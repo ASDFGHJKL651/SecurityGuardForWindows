@@ -1666,7 +1666,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                            pData->path, pData->details);
             }
             else if (pData->windowType == 6) {
-                swprintf_s(displayText, L"连接信息:\nIP: %s\nDomain: %s",
+                swprintf_s(displayText, L"连接信息:\nIP: %hs\nDomain: %hs",
                            pData->ip, pData->domain);
             }
 
