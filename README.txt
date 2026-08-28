@@ -39,7 +39,8 @@ Security Guard for Windows 是一套面向 Windows 10/11（x64）的轻量级端
 3. 快速开始（5 分钟部署）
 -------------------------------------------------------------------------------
 初次部署步骤：
-  1. 准备目录：将编译好的所有 .exe、依赖 .dll 及 7z.exe 按下方「目录结构」放置于 AppDir。
+  1. 准备目录：将编译好的所有 .exe、依赖 .dll按下方「目录结构」放置于 AppDir。（若无编译器可运行.\g++installer.ps1;若需添加至系统PATH，运行.\g++installer.ps1 -SystemPath）
+  2. 安装依赖：将7-zip-installer.ps1与编译好的 .exe放置与同一目录并运行，自动安装7-zip。
   2. 启动系统：以管理员身份运行 Verification.exe（或先运行 Launcher.exe 创建计划任务实现开机自启）。
   3. 查看界面：运行 User_UI.exe（或等待 Verification 自动启动），系统托盘将出现图标，表示系统已就绪。
 
