@@ -1486,8 +1486,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             int height = (int)(120 * scale);
             int screenW = GetSystemMetrics(SM_CXSCREEN);
             int screenH = GetSystemMetrics(SM_CYSCREEN);
-            int x = screenW - width - 400;
-            int y = screenH - height - 400;
+            int x = screenW - width - 0;  //设置为紧贴窗口右侧，根据实际调整（部分设备实际可能超出边框）
+            int y = screenH - height - 0; //设置为紧贴窗口下侧，根据实际调整（部分设备实际可能超出边框）
             SetWindowPos(hwnd, NULL, x, y, width, height, SWP_NOZORDER);
             // 设置默认操作
             switch (pData->windowType) {
