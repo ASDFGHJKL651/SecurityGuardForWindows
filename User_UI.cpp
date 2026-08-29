@@ -59,6 +59,7 @@ g++ -fdiagnostics-color=always -g "%SourceCodePath%\User_UI.cpp" -o "%Executable
 #include <excpt.h>     // for VEH
 #include <tlhelp32.h> 
 #include <winternl.h>
+#include "logrecord.h"
 #pragma comment(lib, "fwpuclnt.lib")
 
 #include "nlohmann/json.hpp"
@@ -139,17 +140,17 @@ std::vector<std::wstring> g_whitelist;
 std::unordered_map<std::wstring, std::pair<int, std::chrono::steady_clock::time_point>> g_decisionCache;
 const int CACHE_EXPIRY_SECONDS = 120;
 
-// [NEW] 弹窗缓存：路径(小写) -> 最后弹窗时间（仅用于类型2和4）
+//弹窗缓存：路径(小写) -> 最后弹窗时间（仅用于类型2和4）
 std::unordered_map<std::wstring, std::chrono::steady_clock::time_point> g_alertCache;
 
 //  注册表弹窗缓存（类型3，30秒内不重复弹窗） 
 std::unordered_map<std::wstring, std::chrono::steady_clock::time_point> g_regAlertCache;
 const int REG_ALERT_CACHE_EXPIRY_SECONDS = 30;   // 30秒
 
-// [MOD] 信任路径集合（永久有效，本次运行期间不弹窗）
+//信任路径集合（永久有效，本次运行期间不弹窗）
 std::unordered_set<std::wstring> g_trustedPaths;
 
-// [MOD] 动态基础目录（存放程序所在路径）
+//动态基础目录（存放程序所在路径）
 std::wstring g_baseDir;
 
 HBRUSH g_hWhiteBrush = NULL;
@@ -266,7 +267,7 @@ HWND CreateAlertWindow(const MessageFromControlCenter& data);
 void LoadWhitelist();
 std::wstring ToLower(const std::wstring& str);
 void CleanExpiredCache();
-void CleanExpiredAlertCache();      // [NEW] 清理过期的弹窗缓存
+void CleanExpiredAlertCache();      //清理过期的弹窗缓存
 void ApplyDecision(int buttonId, const std::wstring& path, int pid);
 void AddToHighTrustWhiteList(const std::wstring& filePath);
 //  服务/任务操作辅助函数 
@@ -281,10 +282,14 @@ bool InitWFP() {
     DWORD ret = FwpmEngineOpen0(NULL, RPC_C_AUTHN_WINNT, NULL, NULL, &g_engineHandle);
     if (ret != ERROR_SUCCESS) {
         printf("[ERROR] FwpmEngineOpen0 failed: %d\n", ret);
+        char logs[64];
+        sprintf_s(logs,sizeof(logs),"FwpmEngineOpen0 failed: %d",ret);
+        LogRecord::WriteLog(L".\\Logs\\LogFiles\\User_UI.log","[ERROR]","[User_UI]",logs);
         return false;
     }
     g_wfpInitialized = true;
     printf("[DEBUG] WFP initialized successfully. Engine handle: %p\n", g_engineHandle);
+    LogRecord::WriteLog(L".\\Logs\\LogFiles\\User_UI.log","[INFO]","[User_UI]","WFP initialized successfully");
     return true;
 }
 
@@ -354,6 +359,9 @@ bool AddBlockRuleFor5Tuple(in_addr srcIP, u_short srcPort, in_addr dstIP, u_shor
     DWORD ret = FwpmFilterAdd0(g_engineHandle, &filter, NULL, &filterId);
     if (ret != ERROR_SUCCESS) {
         printf("[ERROR] FwpmFilterAdd0 (5-tuple) failed: %d (0x%08X)\n", ret, ret);
+        char logs[64];
+        sprintf_s(logs,sizeof(logs),"FwpmFilterAdd0 (5-tuple) failed: %d (0x%08X)",ret,ret);
+        LogRecord::WriteLog(L".\\Logs\\LogFiles\\User_UI.log","[ERROR]","[User_UI]",logs);
         return false;
     }
 
@@ -366,20 +374,28 @@ bool AddBlockRuleFor5Tuple(in_addr srcIP, u_short srcPort, in_addr dstIP, u_shor
               ((dstIP.S_un.S_addr >> 16) & 0xFF), ((dstIP.S_un.S_addr >> 24) & 0xFF));
     printf("[DEBUG] Block rule added for 5-tuple: %s:%u -> %s:%u proto=%u, filterId=%llu\n",
            srcStr, srcPort, dstStr, dstPort, protocol, filterId);
+    char logs[128];
+    sprintf_s(logs,sizeof(logs),"Block rule added for 5-tuple: %s:%u -> %s:%u proto=%u, filterId=%llu",srcStr, srcPort, dstStr, dstPort, protocol, filterId);
+    LogRecord::WriteLog(L".\\Logs\\LogFiles\\User_UI.log","[INFO]","[User_UI]",logs);
     return true;
 }
 
 //  权限、进程控制、管道等原有函数 
 bool EnableDebugPrivilege() {
     HANDLE hToken;
+    char logs[64];
     if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &hToken)) {
         std::cerr << "OpenProcessToken failed, error: " << GetLastError() << std::endl;
+        sprintf_s(logs,sizeof(logs),"OpenProcessToken failed, error: %d",GetLastError());
+        LogRecord::WriteLog(L".\\Logs\\LogFiles\\User_UI.log","[ERROR]","[User_UI]",logs);
         return false;
     }
 
     LUID luid;
     if (!LookupPrivilegeValueW(NULL, L"SeDebugPrivilege", &luid)) {
         std::cerr << "LookupPrivilegeValueW failed, error: " << GetLastError() << std::endl;
+        sprintf_s(logs,sizeof(logs),"LookupPrivilegeValueW failed, error: %d",GetLastError());
+        LogRecord::WriteLog(L".\\Logs\\LogFiles\\User_UI.log","[ERROR]","[User_UI]",logs);
         CloseHandle(hToken);
         return false;
     }
@@ -391,16 +407,22 @@ bool EnableDebugPrivilege() {
 
     if (!AdjustTokenPrivileges(hToken, FALSE, &tp, sizeof(tp), NULL, NULL)) {
         std::cerr << "AdjustTokenPrivileges failed, error: " << GetLastError() << std::endl;
+        sprintf_s(logs,sizeof(logs),"AdjustTokenPrivileges failed, error: %d",GetLastError());
+        LogRecord::WriteLog(L".\\Logs\\LogFiles\\User_UI.log","[ERROR]","[User_UI]",logs);
         CloseHandle(hToken);
         return false;
     }
 
     if (GetLastError() == ERROR_SUCCESS) {
         std::cout << "SeDebugPrivilege enabled successfully." << std::endl;
+        LogRecord::WriteLog(L".\\Logs\\LogFiles\\User_UI.log","[INFO]","[User_UI]","SeDebugPrivilege enabled successfully.");
+        CloseHandle(hToken);
         CloseHandle(hToken);
         return true;
     } else {
         std::cerr << "SeDebugPrivilege not enabled, error: " << GetLastError() << std::endl;
+        sprintf_s(logs,sizeof(logs),"SeDebugPrivilege not enabled, error: %d",GetLastError());
+        LogRecord::WriteLog(L".\\Logs\\LogFiles\\User_UI.log","[ERROR]","[User_UI]",logs);
         CloseHandle(hToken);
         return false;
     }
@@ -411,6 +433,7 @@ static RtlSetProcessIsCritical_t g_pRtlSetProcessIsCritical = nullptr;
 
 bool SetProcessCritical(bool bSet) {
     // 首次调用时加载函数指针
+    char logs[128];
     if (g_pRtlSetProcessIsCritical == nullptr) {
         HMODULE hNtdll = GetModuleHandleW(L"ntdll.dll");
         if (hNtdll) {
@@ -418,6 +441,7 @@ bool SetProcessCritical(bool bSet) {
         }
         if (g_pRtlSetProcessIsCritical == nullptr) {
             std::cerr << "[Critical] RtlSetProcessIsCritical not available." << std::endl;
+            LogRecord::WriteLog(L".\\Logs\\LogFiles\\User_UI.log","[ERROR]","[User_UI]","RtlSetProcessIsCritical not available.");
             return false;
         }
     }
@@ -425,9 +449,12 @@ bool SetProcessCritical(bool bSet) {
     NTSTATUS status = g_pRtlSetProcessIsCritical(bSet ? TRUE : FALSE, NULL, FALSE);
     if (status == 0) {
         std::cout << "[Critical] Process " << (bSet ? "set" : "unset") << " as system critical." << std::endl;
+        LogRecord::WriteLog(L".\\Logs\\LogFiles\\User_UI.log","[INFO]","[User_UI]","Process set/unset as system critical");
         return true;
     } else {
         std::cerr << "[Critical] " << (bSet ? "Set" : "Unset") << " failed, status: 0x" << std::hex << status << std::endl;
+        sprintf_s(logs,sizeof(logs),"Set/Unset  failed, status: 0x%x",status);
+        LogRecord::WriteLog(L".\\Logs\\LogFiles\\User_UI.log","[ERROR]","[User_UI]",logs);
         return false;
     }
 }
@@ -435,9 +462,12 @@ bool SetProcessCritical(bool bSet) {
 typedef LONG (NTAPI *NtSuspendProcess)(IN HANDLE ProcessHandle);
 
 bool SuspendProcess(DWORD pid) {
+    char logs[64];
     HANDLE hProcess = OpenProcess(PROCESS_SUSPEND_RESUME, FALSE, pid);
     if (hProcess == NULL) {
         std::cerr << "OpenProcess failed, error code: " << GetLastError() << std::endl;
+        sprintf_s(logs,sizeof(logs),"OpenProcess failed, error code:%d",GetLastError());
+        LogRecord::WriteLog(L".\\Logs\\LogFiles\\User_UI.log","[ERROR]","[User_UI]",logs);
         return false;
     }
 
@@ -446,6 +476,7 @@ bool SuspendProcess(DWORD pid) {
 
     if (pfnNtSuspendProcess == NULL) {
         std::cerr << "Failed to get NtSuspendProcess function address" << std::endl;
+        LogRecord::WriteLog(L".\\Logs\\LogFiles\\User_UI.log","[ERROR]","[User_UI]","Failed to get NtSuspendProcess function address");
         CloseHandle(hProcess);
         return false;
     }
@@ -455,9 +486,13 @@ bool SuspendProcess(DWORD pid) {
 
     if (status == 0) {
         std::cout << "Successfully suspended process PID: " << pid << std::endl;
+        sprintf_s(logs,sizeof(logs),"Successfully suspended process PID:%d",pid );
+        LogRecord::WriteLog(L".\\Logs\\LogFiles\\User_UI.log","[INFO]","[User_UI]",logs);
         return true;
     } else {
         std::cerr << "NtSuspendProcess failed, status: " << status << std::endl;
+        sprintf_s(logs,sizeof(logs),"NtSuspendProcess failed, status: %d",status);
+        LogRecord::WriteLog(L".\\Logs\\LogFiles\\User_UI.log","[ERROR]","[User_UI]",logs);
         return false;
     }
 }
@@ -465,9 +500,12 @@ bool SuspendProcess(DWORD pid) {
 typedef LONG (NTAPI *NtResumeProcess)(HANDLE ProcessHandle);
 
 bool ResumeProcessByPID_NT(DWORD dwProcessID) {
+    char logs[64];
     HANDLE hProcess = OpenProcess(PROCESS_SUSPEND_RESUME, FALSE, dwProcessID);
     if (hProcess == NULL) {
         std::cerr << "OpenProcess failed. Error: " << GetLastError() << std::endl;
+        sprintf_s(logs,sizeof(logs),"OpenProcess failed. Error: %d",GetLastError() );
+        LogRecord::WriteLog(L".\\Logs\\LogFiles\\User_UI.log","[ERROR]","[User_UI]",logs);
         return false;
     }
 
@@ -476,6 +514,7 @@ bool ResumeProcessByPID_NT(DWORD dwProcessID) {
 
     if (pfnNtResumeProcess == NULL) {
         std::cerr << "Failed to get NtResumeProcess address." << std::endl;
+        LogRecord::WriteLog(L".\\Logs\\LogFiles\\User_UI.log","[ERROR]","[User_UI]","Failed to get NtSuspendProcess function address");
         CloseHandle(hProcess);
         return false;
     }
@@ -487,15 +526,20 @@ bool ResumeProcessByPID_NT(DWORD dwProcessID) {
 }
 
 bool KillProcess(DWORD processId) {
+    char logs[64];
     HANDLE hProcess = OpenProcess(PROCESS_TERMINATE, FALSE, processId);
     if (hProcess == NULL) {
         std::cerr << "OpenProcess failed, error code: " << GetLastError() << std::endl;
+        sprintf_s(logs,sizeof(logs),"OpenProcess failed. Error: %d",GetLastError() );
+        LogRecord::WriteLog(L".\\Logs\\LogFiles\\User_UI.log","[ERROR]","[User_UI]",logs);
         return false;
     }
 
     BOOL result = TerminateProcess(hProcess, 0);
     if (result == 0) {
         std::cerr << "TerminateProcess failed, error code: " << GetLastError() << std::endl;
+        sprintf_s(logs,sizeof(logs),"TerminateProcess failed, error code:%d",GetLastError() );
+        LogRecord::WriteLog(L".\\Logs\\LogFiles\\User_UI.log","[ERROR]","[User_UI]",logs);
         CloseHandle(hProcess);
         return false;
     }
@@ -703,6 +747,11 @@ LONG SetRegistryValue(
     const wchar_t* lpValueName = valueName.empty() ? NULL : valueName.c_str();
     lResult = RegSetValueExW(hKey, lpValueName, 0, regType, lpData, cbData);
     RegCloseKey(hKey);
+    if((int)lResult==0){LogRecord::WriteLog(L".\\Logs\\LogFiles\\User_UI.log","[INFO]","[User_UI]","Set registry value successfully.");}
+    else{
+        char logs[64];
+        sprintf_s(logs,sizeof(logs),"Failed to set registry value ,error: %x",lResult);
+        LogRecord::WriteLog(L".\\Logs\\LogFiles\\User_UI.log","[ERROR]","[User_UI]",logs);}
     return lResult;
 }
 
@@ -820,7 +869,7 @@ void CleanExpiredCache() {
     }
 }
 
-// [NEW] 清理过期的弹窗缓存（类型2和4）
+//清理过期的弹窗缓存（类型2和4）
 void CleanExpiredAlertCache() {
     auto now = std::chrono::steady_clock::now();
     for (auto it = g_alertCache.begin(); it != g_alertCache.end(); ) {
@@ -856,10 +905,10 @@ void ApplyDecision(int buttonId, const std::wstring& path, int pid) {
     switch (buttonId) {
         case IDC_BUTTON_TRUST:
         case IDC_BUTTON_UNTRUST:
-            // 无操作（窗口会被销毁，进程可能仍挂起？原始行为不恢复，保持）
+            // 无操作
             break;
         case IDC_BUTTON_QUARANTINE: {
-            // [MOD] 使用动态路径
+            //使用动态路径
             std::wstring wcmd_isol = L"\"" + g_baseDir + L"\\isol.exe\"  add  \"" + g_baseDir + L"\\ISOL\"  \"" + path + L"\"  @pASs7W#Ord";
             wchar_t* cmd_isol_ = new wchar_t[wcslen(wcmd_isol.c_str()) + 1];
             lstrcpyW(cmd_isol_, wcmd_isol.c_str());
@@ -1072,6 +1121,8 @@ bool DisableService(const std::wstring& serviceName) {
     }
     CloseServiceHandle(hService);
     CloseServiceHandle(hSCM);
+    if(ok != 0){LogRecord::WriteLog(L".\\Logs\\LogFiles\\User_UI.log","[INFO]","[User_UI]","Disable service successfully.");}
+    else{LogRecord::WriteLog(L".\\Logs\\LogFiles\\User_UI.log","[ERROR]","[User_UI]","Failed to disable service");}
     return ok != 0;
 }
 
@@ -1086,6 +1137,8 @@ bool DeleteServiceByName(const std::wstring& serviceName) {
     BOOL ok = DeleteService(hService);
     CloseServiceHandle(hService);
     CloseServiceHandle(hSCM);
+    if(ok != 0){LogRecord::WriteLog(L".\\Logs\\LogFiles\\User_UI.log","[INFO]","[User_UI]","Delete service successfully.");}
+    else{LogRecord::WriteLog(L".\\Logs\\LogFiles\\User_UI.log","[ERROR]","[User_UI]","Failed to delete service");}
     return ok != 0;
 }
 
@@ -1181,6 +1234,8 @@ bool DisableTask(const std::wstring& taskPath) {
     pRootFolder->Release();
     pService->Release();
     CoUninitialize();
+    if(SUCCEEDED(hr)){LogRecord::WriteLog(L".\\Logs\\LogFiles\\User_UI.log","[INFO]","[User_UI]","Disable task successfully.");}
+    else{LogRecord::WriteLog(L".\\Logs\\LogFiles\\User_UI.log","[ERROR]","[User_UI]","Failed to disable task");}
     return SUCCEEDED(hr);
 }
 
@@ -1217,6 +1272,8 @@ bool DeleteTaskByName(const std::wstring& taskPath) {
     pRootFolder->Release();
     pService->Release();
     CoUninitialize();
+    if(SUCCEEDED(hr)){LogRecord::WriteLog(L".\\Logs\\LogFiles\\User_UI.log","[INFO]","[User_UI]","Delete task successfully.");}
+    else{LogRecord::WriteLog(L".\\Logs\\LogFiles\\User_UI.log","[ERROR]","[User_UI]","Failed to delete task");}
     return SUCCEEDED(hr);
 }
 
@@ -1743,7 +1800,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 delete pMsg;
                 return 0;
             }
-            // [MOD] 检查是否已被用户信任（本次运行永久有效）
+            // 检查是否已被用户信任（本次运行永久有效）
             std::wstring lowerPath = ToLower(pMsg->path);
             if (pMsg->WindowType != 4){
                 if (g_trustedPaths.find(lowerPath) != g_trustedPaths.end()) {
@@ -1751,7 +1808,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     return 0;  // 信任路径不再弹窗
                 }
             }
-            // [NEW] 针对类型2和4：先检查弹窗缓存，避免重复弹窗
+            // 针对类型2和4：先检查弹窗缓存，避免重复弹窗
             if (pMsg->WindowType == 2) {
                 CleanExpiredAlertCache();  // 清理过期条目
                 auto alertIt = g_alertCache.find(lowerPath);
@@ -1804,14 +1861,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 }
                 // 自动隔离（score>=200）
                 if (int(pMsg->score) >= 200 && pMsg->WindowType==2) {
-                    // [MOD] 使用动态路径
+                    //使用动态路径
                     STARTUPINFO si;
                     PROCESS_INFORMATION pi;
 
                     ZeroMemory(&si, sizeof(si));
                     si.cb = sizeof(si);
                     ZeroMemory(&pi, sizeof(pi));
-                    // 注意：此处使用pData->path？但pData尚未创建，应使用pMsg->path
+                    //使用pMsg->path
                     std::wstring wcmd_isol = L"\"" + g_baseDir + L"\\isol.exe\"  add  \"" + g_baseDir + L"\\ISOL\"  \"" + (wchar_t*)(pMsg->path) + L"\"  @pASs7W#Ord";
                     wchar_t* cmd_isol_ = new wchar_t[wcslen(wcmd_isol.c_str()) + 1];
                     lstrcpyW(cmd_isol_, wcmd_isol.c_str());
@@ -1906,7 +1963,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         ZeroMemory(&si, sizeof(si));
         si.cb = sizeof(si);
         ZeroMemory(&pi, sizeof(pi));
-        // [MOD] 使用动态路径构建命令
+        // 使用动态路径构建命令
         std::wstring wcmd_sandbox = g_baseDir + L"\\SandBox.exe \"" + (wchar_t*)(pData->path) + L"\"";
         std::wstring wcmd_isol = L"\"" + g_baseDir + L"\\isol.exe\"  add  \"" + g_baseDir + L"\\ISOL\"  \"" + (wchar_t*)(pData->path) + L"\"  @pASs7W#Ord";
         std::wstring wcmd_del = (std::wstring)L"cmd /c del /f /q /a \"" + (wchar_t*)(pData->path) + (std::wstring)L"\"";
@@ -1934,7 +1991,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 std::wstring lowerPath = ToLower(pData->path);
                 auto now = std::chrono::steady_clock::now();
                 g_decisionCache[lowerPath] = { buttonId, now };
-                // [MOD] 若为信任，额外记录到永久集合
+                //若为信任，额外记录到永久集合
                 if (buttonId == IDC_BUTTON_TRUST) {
                     g_trustedPaths.insert(lowerPath);
                 }
@@ -2208,7 +2265,7 @@ void LoadWhitelist() {
 
 //  程序入口 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int nCmdShow) {
-    // [MOD] 获取当前可执行文件所在目录并保存到全局变量
+    // 获取当前可执行文件所在目录并保存到全局变量
     wchar_t exePath[MAX_PATH];
     GetModuleFileName(NULL, exePath, MAX_PATH);
     std::wstring fullPath(exePath);
