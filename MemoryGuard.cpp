@@ -147,7 +147,7 @@ private:
 
 //全局缓存定义
 static LRUCache<std::wstring, uint32_t> g_ModuleHashCache(5000); // (模块路径, .text哈希)
-static LRUCache<DWORD, std::map<std::wstring, uint32_t>> g_PidModuleHashCache(3000); // 每个进程的模块哈希缓存
+static LRUCache<DWORD, std::map<std::wstring, uint32_t>> g_PidModuleHashCache(3000); // 每个进程的模块哈希缓存，实际每个进程内使用map，但这里只存整体？
 // 实现为：每个进程独立LRU缓存，但总条目受控。
 static std::map<DWORD, LRUCache<std::wstring, uint32_t>> g_PidModuleHashCacheMap;
 static std::mutex g_HashCacheMutex;
@@ -4790,7 +4790,7 @@ static void LoadMaliciousIPs() {
     }
 
     // 拼接 "malicious.txt"
-    strcat_s(exePathA, MAX_PATH, "malicious.txt");
+    strcat_s(exePathA, MAX_PATH, "WhiteList\\malicious.txt");
 
     // 尝试打开文件
     std::ifstream file(exePathA);

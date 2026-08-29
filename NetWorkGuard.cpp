@@ -1773,13 +1773,13 @@ int main() {
             SetProcessCritical(false);
             return 1;
         }
-        if (!LoadMaliciousList("malicious.txt")) {
+        if (!LoadMaliciousList("WhiteList\\malicious.txt")) {
             printf("[WARNING] Failed to load malicious.txt\n");
         }
-        if (!LoadWhitelist("whitelist.txt")) {
+        if (!LoadWhitelist("WhiteList\\whitelist.txt")) {
             printf("[WARNING] Failed to load whitelist.txt\n");
         }
-        if (!LoadMaliciousTLSFingerprints("tls_fingerprints.txt")) {
+        if (!LoadMaliciousTLSFingerprints("WhiteList\\tls_fingerprints.txt")) {
             printf("[WARNING] Failed to load tls_fingerprints.txt\n");
         }
         if (!InitWFP()) {
