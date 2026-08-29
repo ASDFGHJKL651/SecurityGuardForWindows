@@ -1,7 +1,7 @@
 ================================================================================
                         Security Guard for Windows
                           端点检测与响应系统（EDR）
-                       版本：1.0-test | 最后更新：2026-08-28
+                       版本：1.0-test | 最后更新：2026-08-29
 ================================================================================
 
 **** 重要提示 ****
@@ -35,12 +35,23 @@ Security Guard for Windows 是一套面向 Windows 10/11（x64）的轻量级端
 编译器：    MinGW-w64 8.1+ 或 MSVC（推荐 MinGW）
 第三方库：  nlohmann/json.hpp（需自行下载并放置于包含路径）
 
+运行时 DLL 依赖：
+本程序使用 MinGW-w64 编译，运行时需要以下库：
+libgcc_s_seh-1.dll
+libmcfgthread-2.dll
+libstdc++-6.dll
+以上文件可在 MinGW-w64 安装目录的 bin 子目录中找到（例如 C:\mingw64\bin\）。
+请将这三个 DLL 文件复制到以下目录：
+AppDir\（主程序目录）
+AppDir\Verification\
+AppDir\WinPE\Executable\
+以确保所有模块都能正常加载。
+
 
 3. 快速开始（5 分钟部署）
 -------------------------------------------------------------------------------
 初次部署步骤：
-  1. 准备目录：将编译好的所有 .exe、依赖 .dll按下方「目录结构」放置于 AppDir。（若无编译器可运行.\g++installer.ps1;若需添加至系统PATH，运行.\g++installer.ps1 -SystemPath）
-  2. 安装依赖：将7-zip-installer.ps1与编译好的 .exe放置与同一目录并运行，自动安装7-zip。
+  1. 准备目录：将编译好的所有 .exe、依赖 .dll 及 7z.exe 按下方「目录结构」放置于 AppDir。
   2. 启动系统：以管理员身份运行 Verification.exe（或先运行 Launcher.exe 创建计划任务实现开机自启）。
   3. 查看界面：运行 User_UI.exe（或等待 Verification 自动启动），系统托盘将出现图标，表示系统已就绪。
 
@@ -67,7 +78,8 @@ AppDir\
 │   │   └── HashValue.json         # 加密存储的 SHA‑256 哈希（由 CreateHash.exe 生成）
 │   ├── CreateHash.exe             # 哈希生成工具（生成后建议删除）
 │   ├── Launcher.exe               # 创建开机计划任务（仅需运行一次）
-│   └── Verification.exe           # 开机自启动校验程序（系统入口）
+│   ├── Verification.exe           # 开机自启动校验程序（系统入口）
+│   └── ...（运行所需的 .dll 文件）
 ├── WhiteList\
 │   └── HighTrustWhiteList.json    # 高信任白名单（文件及目录）
 ├── WinPE\
@@ -75,7 +87,8 @@ AppDir\
 │   └── Executable\                # WinPE 环境下运行的工具
 │       ├── CMDanalyzer_forWinPE.exe
 │       ├── PEanalyzer_forWinPE.exe
-│       └── traverseallfiles.exe
+│       ├── traverseallfiles.exe
+│       └── ...（运行所需的 .dll 文件）
 ├── CMDanalyzer.exe                # 脚本（.bat/.cmd/.ps1）分析器
 ├── ControlCenter.exe              # 消息汇聚与路由中枢（必需）
 ├── DelFromZip.exe                 # 从压缩包中删除指定文件
@@ -109,7 +122,6 @@ AppDir\
   TaskScheduler.exe     计划任务监控                    推荐
   CreateHash.exe        一次性哈希生成工具              仅部署/更新时使用
   RestartInWinPE.exe    WinPE 救援（按需）              按需使用
-
 
 5. 编译指南
 -------------------------------------------------------------------------------
@@ -235,28 +247,34 @@ AppDir\
 
 8. 故障排查
 -------------------------------------------------------------------------------
-8.1 开机后 Verification.exe 未启动
+8.1 启动时系统提示“由于找不到 *****.dll，无法继续执行代码。重新安装程序可能会解决此问题。”
+  请检查程序目录（AppDir、AppDir\Verification、AppDir\WinPE\Executable）
+  下是否包含所需DLL（libgcc_s_seh-1.dll、libmcfgthread-2.dll、libstdc++-6.dll）。
+  若缺失，请从 MinGW-w64 的 bin 目录复制这些文件到上述目录。若仍然提示，请确认系统 PATH
+  环境变量中是否包含这些 DLL 的路径，或使用 Dependency Walker 工具检查缺失的依赖。
+
+8.2 开机后 Verification.exe 未启动
   检查计划任务：schtasks /query /tn "SecurityGuardStartupTask"
   若不存在，以管理员身份运行 Launcher.exe 重新创建。
 
-8.2 托盘图标消失
+8.3 托盘图标消失
   - 确认 User_UI.exe 正在运行（任务管理器 → 进程）。
   - 若未运行，手动启动；若已运行，尝试重启资源管理器（explorer.exe）。
 
-8.3 部分模块显示“管道连接失败”
+8.4 部分模块显示“管道连接失败”
   - 确保 ControlCenter.exe 已优先启动（它是管道服务器）。
   - 检查防火墙是否阻止本地管道通信（通常不会）。
 
-8.4 MemoryGuard 无法检测内核钩子
+8.5 MemoryGuard 无法检测内核钩子
   - 若系统启用了 HVCI（虚拟化代码完整性），内核钩子检测功能会降级，此为正常行为。
   - 可通过 msinfo32 查看“基于虚拟化的安全性”状态。
 
-8.5 更新程序后 Verification 提示哈希不匹配
+8.6 更新程序后 Verification 提示哈希不匹配
   - 运行 CreateHash.exe 重新生成 HashValue.json。
   - 将新生成的 HashValue.json 复制到 AppDir\Verification\Configuration\。
   - 将新程序文件复制到 AppDir\Backup\ 目录（作为恢复源）。
 
-8.6 NetworkGuard 无法抓取网络包
+8.7 NetworkGuard 无法抓取网络包
   - 在 Windows 10 1703 以后，原始套接字（SIO_RCVALL）可能受组策略限制。
   - 可尝试以管理员身份执行 netsh 相关设置（需自行研究）。
   - 或考虑改用 WFP 回调模式（需二次开发）。
