@@ -81,6 +81,9 @@ AppDir\
 │   ├── Verification.exe           # 开机自启动校验程序（系统入口）
 │   └── ...（运行所需的 .dll 文件）
 ├── WhiteList\
+│   ├── malicious.txt              # 恶意IP/域名黑名单
+│   ├── tls_fingerprints.txt       # 恶意 TLS Client Hello 的JA3/MD5指纹
+│   ├── whitelist.txt              # IP/域名白名单
 │   └── HighTrustWhiteList.json    # 高信任白名单（文件及目录）
 ├── WinPE\
 │   ├── WinPE.iso                  # WinPE 镜像（需自行准备）
@@ -188,7 +191,7 @@ AppDir\
   }
   修改后无需重启，FileSystemMonitor 和 MemoryGuard 每 5 分钟自动重载。
 
-6.2 恶意 IP/域名黑名单（malicious.txt）
+6.2 恶意 IP/域名黑名单（WhiteList\malicious.txt）
   每行一个 IP（支持 CIDR，如 192.168.1.0/24）或域名（支持 *.example.com 通配符），
   由 NetworkGuard.exe 加载。
   示例：
@@ -197,7 +200,7 @@ AppDir\
       *.malware.com
       evil.org
 
-6.3 TLS 指纹库（tls_fingerprints.txt）
+6.3 TLS 指纹库（WhiteList\tls_fingerprints.txt）
   每行一个 JA3/MD5 指纹，用于匹配恶意 TLS Client Hello（由 NetworkGuard 使用）。
   示例：
       e3b0c44298fc1c149afbf4c8996fb924
