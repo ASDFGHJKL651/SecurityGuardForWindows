@@ -15,7 +15,7 @@ window type:
 
 g++编译:
 cd %g++Path%
-g++ -fdiagnostics-color=always -g "%SourceCodePath%\User_UI.cpp" -o "%ExecutablePath%\User_UI.exe" -mwindows -municode -lwbemuuid -loleaut32 -ladvapi32 -luuid -ltaskschd -lws2_32 -liphlpapi -lfwpuclnt -lpsapi -lole32 -std=c++11 -Wno-write-strings
+g++ -fdiagnostics-color=always -g "%SourceCodePath%\User_UI.cpp" -o "%ExecutablePath%\User_UI.exe" -mwindows -municode -lwbemuuid -loleaut32 -ladvapi32 -luuid -ltaskschd -lws2_32 -liphlpapi -lfwpuclnt -lpsapi -lole32 -lcomdlg32 -lshell32 -std=c++11 -Wno-write-strings
 
 运行权限：管理员权限
 */
@@ -59,6 +59,8 @@ g++ -fdiagnostics-color=always -g "%SourceCodePath%\User_UI.cpp" -o "%Executable
 #include <excpt.h>     // for VEH
 #include <tlhelp32.h> 
 #include <winternl.h>
+#include <commdlg.h>   
+#include <shlobj.h>    
 #include "logrecord.h"
 #pragma comment(lib, "fwpuclnt.lib")
 
@@ -79,6 +81,12 @@ g++ -fdiagnostics-color=always -g "%SourceCodePath%\User_UI.cpp" -o "%Executable
 #define IDC_BUTTON_DELETE_TASK  1012
 #define IDC_BUTTON_ALLOW_CONN  1013
 #define IDC_BLOCK_CONN         1014
+#define IDC_BUTTON_ADD_FILE         1015
+#define IDC_BUTTON_ADD_FOLDER       1016
+#define IDC_BUTTON_EDIT_MALICIOUS  1017
+#define IDC_BUTTON_EDIT_WHITELIST  1018
+#define IDC_BUTTON_EDIT_TLS        1019
+#define IDC_BUTTON_RESTORE_ISOL   1020 
 #define IDC_PROC_STATIC_BASE  2000
 #define IDC_PROC_BUTTON_BASE  2100
 #define IDC_EXTRA_STATIC     (IDC_PROC_STATIC_BASE + SUB_PROCESS_COUNT)   // 2006
@@ -135,22 +143,23 @@ DWORD g_selfPid = 0;
 
 // 白名单全局变量
 std::vector<std::wstring> g_whitelist;
+std::unordered_set<std::wstring> g_trustedFolders;
 
 // 决策缓存：路径(小写) -> (按钮ID, 时间戳)
 std::unordered_map<std::wstring, std::pair<int, std::chrono::steady_clock::time_point>> g_decisionCache;
 const int CACHE_EXPIRY_SECONDS = 120;
 
-//弹窗缓存：路径(小写) -> 最后弹窗时间（仅用于类型2和4）
+// 弹窗缓存：路径(小写) -> 最后弹窗时间（仅用于类型2和4）
 std::unordered_map<std::wstring, std::chrono::steady_clock::time_point> g_alertCache;
 
 //  注册表弹窗缓存（类型3，30秒内不重复弹窗） 
 std::unordered_map<std::wstring, std::chrono::steady_clock::time_point> g_regAlertCache;
 const int REG_ALERT_CACHE_EXPIRY_SECONDS = 30;   // 30秒
 
-//信任路径集合（永久有效，本次运行期间不弹窗）
+// 信任路径集合（永久有效，本次运行期间不弹窗）
 std::unordered_set<std::wstring> g_trustedPaths;
 
-//动态基础目录（存放程序所在路径）
+// 动态基础目录（存放程序所在路径）
 std::wstring g_baseDir;
 
 HBRUSH g_hWhiteBrush = NULL;
@@ -213,6 +222,12 @@ struct WindowData {
     HWND hExtraButton;          // 退出按钮
     double extraCpuSum;         // 汇总 CPU
     double extraMemSum;
+    HWND hAddFileButton;        // “添加文件白名单”按钮
+    HWND hAddFolderButton;      // “添加文件夹白名单”按钮
+    HWND hEditMalicious;
+    HWND hEditWhitelist;
+    HWND hEditTLS;
+    HWND hRestoreIsolButton;
 };
 
 #pragma pack(push, 1)
@@ -267,7 +282,7 @@ HWND CreateAlertWindow(const MessageFromControlCenter& data);
 void LoadWhitelist();
 std::wstring ToLower(const std::wstring& str);
 void CleanExpiredCache();
-void CleanExpiredAlertCache();      //清理过期的弹窗缓存
+void CleanExpiredAlertCache();      // 清理过期的弹窗缓存
 void ApplyDecision(int buttonId, const std::wstring& path, int pid);
 void AddToHighTrustWhiteList(const std::wstring& filePath);
 //  服务/任务操作辅助函数 
@@ -277,6 +292,58 @@ bool DisableTask(const std::wstring& taskPath);
 bool DeleteTaskByName(const std::wstring& taskPath);
 bool IsService(const std::wstring& name);
 bool IsTask(const std::wstring& path);
+static std::string WideToUtf8(const std::wstring& wstr);
+
+// 将路径添加到 HighTrustWhiteList.json 的指定数组（"Files" 或 "Paths"）
+void AddPathToHighTrustList(const std::wstring& path, bool isFolder) {
+    if (path.empty()) return;
+
+    std::wstring jsonPathW = g_baseDir + L"\\WhiteList\\HighTrustWhiteList.json";
+    std::string jsonPath = WideToUtf8(jsonPathW);
+
+    nlohmann::json j;
+    std::ifstream in(jsonPath);
+    if (in.is_open()) {
+        try { in >> j; } catch (...) { j = nlohmann::json::object(); }
+        in.close();
+    } else {
+        j = nlohmann::json::object();
+    }
+
+    std::string pathUtf8 = WideToUtf8(path);
+    if (pathUtf8.empty()) return;
+    std::string lowerPath = pathUtf8;
+    std::transform(lowerPath.begin(), lowerPath.end(), lowerPath.begin(), ::tolower);
+
+    const char* arrayName = isFolder ? "Paths" : "Files";
+    if (!j.contains(arrayName) || !j[arrayName].is_array()) {
+        j[arrayName] = nlohmann::json::array();
+    }
+
+    // 去重（忽略大小写）
+    bool exists = false;
+    for (auto& item : j[arrayName]) {
+        if (item.is_string()) {
+            std::string existing = item.get<std::string>();
+            std::transform(existing.begin(), existing.end(), existing.begin(), ::tolower);
+            if (existing == lowerPath) {
+                exists = true;
+                break;
+            }
+        }
+    }
+    if (!exists) {
+        j[arrayName].push_back(pathUtf8);
+    }
+
+    // 写回文件
+    std::ofstream out(jsonPath, std::ios::out | std::ios::trunc | std::ios::binary);
+    if (out.is_open()) {
+        std::string content = j.dump(4);
+        out.write(content.c_str(), content.size());
+        out.close();
+    }
+}
 
 bool InitWFP() {
     DWORD ret = FwpmEngineOpen0(NULL, RPC_C_AUTHN_WINNT, NULL, NULL, &g_engineHandle);
@@ -869,7 +936,7 @@ void CleanExpiredCache() {
     }
 }
 
-//清理过期的弹窗缓存（类型2和4）
+// 清理过期的弹窗缓存（类型2和4）
 void CleanExpiredAlertCache() {
     auto now = std::chrono::steady_clock::now();
     for (auto it = g_alertCache.begin(); it != g_alertCache.end(); ) {
@@ -905,10 +972,10 @@ void ApplyDecision(int buttonId, const std::wstring& path, int pid) {
     switch (buttonId) {
         case IDC_BUTTON_TRUST:
         case IDC_BUTTON_UNTRUST:
-            // 无操作
+            // 无操作（窗口会被销毁，进程可能仍挂起？原始行为不恢复，保持）
             break;
         case IDC_BUTTON_QUARANTINE: {
-            //使用动态路径
+            // 使用动态路径
             std::wstring wcmd_isol = L"\"" + g_baseDir + L"\\isol.exe\"  add  \"" + g_baseDir + L"\\ISOL\"  \"" + path + L"\"  @pASs7W#Ord";
             wchar_t* cmd_isol_ = new wchar_t[wcslen(wcmd_isol.c_str()) + 1];
             lstrcpyW(cmd_isol_, wcmd_isol.c_str());
@@ -1377,7 +1444,43 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 0, 0, 0, 0,
                 hwnd, (HMENU)IDC_EXTRA_BUTTON, hInst, nullptr
             );
-
+            pData->hAddFileButton = CreateWindow(
+                L"BUTTON", L"添加文件白名单",
+                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                0, 0, 0, 0,
+                hwnd, (HMENU)IDC_BUTTON_ADD_FILE, hInst, nullptr
+            );
+            // 创建“添加文件夹白名单”按钮
+            pData->hAddFolderButton = CreateWindow(
+                L"BUTTON", L"添加文件夹白名单",
+                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                0, 0, 0, 0,
+                hwnd, (HMENU)IDC_BUTTON_ADD_FOLDER, hInst, nullptr
+            );
+            pData->hEditMalicious = CreateWindow(
+                L"BUTTON", L"修改IP/域名黑名单",
+                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                0, 0, 0, 0,
+                hwnd, (HMENU)IDC_BUTTON_EDIT_MALICIOUS, hInst, nullptr
+            );
+            pData->hEditWhitelist = CreateWindow(
+                L"BUTTON", L"修改IP/域名白名单",
+                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                0, 0, 0, 0,
+                hwnd, (HMENU)IDC_BUTTON_EDIT_WHITELIST, hInst, nullptr
+            );
+            pData->hEditTLS = CreateWindow(
+                L"BUTTON", L"修改TLS 指纹库黑名单",
+                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                0, 0, 0, 0,
+                hwnd, (HMENU)IDC_BUTTON_EDIT_TLS, hInst, nullptr
+            );
+            pData->hRestoreIsolButton = CreateWindow(
+                L"BUTTON", L"还原隔离文件",
+                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                0, 0, 0, 0,
+                hwnd, (HMENU)IDC_BUTTON_RESTORE_ISOL, hInst, nullptr
+            );
             // 退出按钮（原有）
             pData->hExitButton = CreateWindow(
                 L"BUTTON", L"退出",
@@ -1626,14 +1729,43 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 SetWindowPos(pData->hExtraButton, NULL,
                             cx - rightMargin - btnWidth, yExtra, btnWidth, rowHeight, SWP_NOZORDER);
             }
+            int btnH = (int)(BUTTON_HEIGHT * scale);
+            int gap = (int)(GAP * scale);
+            int bottomMargin = (int)(10 * scale);
+            int totalBtnHeight = 3 * btnH + 2 * gap;   // 三行按钮
+            int startY = cy - bottomMargin - totalBtnHeight;
 
-            // 布局退出按钮（底部居中）
+            // 第一行：添加文件/文件夹白名单（两个按钮并排）
+            int btnW3 = (cx - 3 * gap) / 3;   // 三个按钮，两个间隙
+            int y1 = startY;
+            if (pData->hAddFileButton) {
+                SetWindowPos(pData->hAddFileButton, NULL, gap, y1, btnW3, btnH, SWP_NOZORDER);
+            }
+            if (pData->hAddFolderButton) {
+                SetWindowPos(pData->hAddFolderButton, NULL, gap + btnW3 + gap, y1, btnW3, btnH, SWP_NOZORDER);
+            }
+            if (pData->hRestoreIsolButton) {
+                SetWindowPos(pData->hRestoreIsolButton, NULL, gap + 2 * (btnW3 + gap), y1, btnW3, btnH, SWP_NOZORDER);
+            }
+
+            // 第二行：三个编辑按钮平均分配宽度
+            int y2 = y1 + btnH + gap;
+            if (pData->hEditMalicious) {
+                SetWindowPos(pData->hEditMalicious, NULL, gap, y2, btnW3, btnH, SWP_NOZORDER);
+            }
+            if (pData->hEditWhitelist) {
+                SetWindowPos(pData->hEditWhitelist, NULL, gap + btnW3 + gap, y2, btnW3, btnH, SWP_NOZORDER);
+            }
+            if (pData->hEditTLS) {
+                SetWindowPos(pData->hEditTLS, NULL, gap + 2 * (btnW3 + gap), y2, btnW3, btnH, SWP_NOZORDER);
+            }
+
+            // 第三行：退出按钮居中
+            int btnWExit = (int)(BUTTON_WIDTH * scale);
+            int y3 = y2 + btnH + gap;
+            int xExit = (cx - btnWExit) / 2;
             if (pData->hExitButton) {
-                int btnW = (int)(BUTTON_WIDTH * scale);
-                int btnH = (int)(BUTTON_HEIGHT * scale);
-                int x = (cx - btnW) / 2;
-                int y = cy - btnH - (int)(10 * scale);
-                SetWindowPos(pData->hExitButton, NULL, x, y, btnW, btnH, SWP_NOZORDER);
+                SetWindowPos(pData->hExitButton, NULL, xExit, y3, btnWExit, btnH, SWP_NOZORDER);
             }
             return 0;  // 主窗口布局完成
         }
@@ -1859,16 +1991,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     DWORD PID = static_cast<DWORD>(PID_);
                     SuspendProcess(PID);
                 }
-                // 自动隔离（score>=200）
-                if (int(pMsg->score) >= 200 && pMsg->WindowType==2) {
-                    //使用动态路径
+                // 自动隔离（score>=300）
+                if (int(pMsg->score) >= 300 && pMsg->WindowType==2) {
+                    // 使用动态路径
                     STARTUPINFO si;
                     PROCESS_INFORMATION pi;
 
                     ZeroMemory(&si, sizeof(si));
                     si.cb = sizeof(si);
                     ZeroMemory(&pi, sizeof(pi));
-                    //使用pMsg->path
+                    // 注意：此处使用pData->path？但pData尚未创建，应使用pMsg->path
                     std::wstring wcmd_isol = L"\"" + g_baseDir + L"\\isol.exe\"  add  \"" + g_baseDir + L"\\ISOL\"  \"" + (wchar_t*)(pMsg->path) + L"\"  @pASs7W#Ord";
                     wchar_t* cmd_isol_ = new wchar_t[wcslen(wcmd_isol.c_str()) + 1];
                     lstrcpyW(cmd_isol_, wcmd_isol.c_str());
@@ -1991,7 +2123,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 std::wstring lowerPath = ToLower(pData->path);
                 auto now = std::chrono::steady_clock::now();
                 g_decisionCache[lowerPath] = { buttonId, now };
-                //若为信任，额外记录到永久集合
+                // 若为信任，额外记录到永久集合
                 if (buttonId == IDC_BUTTON_TRUST) {
                     g_trustedPaths.insert(lowerPath);
                 }
@@ -2074,6 +2206,95 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 success_ = AddBlockRuleFor5Tuple(srcIP, srcPort, dstIP, dstPort, protocol);
                 if (success_ == 0){std::cout << "AddBlockRuleFor5Tuple successfully\n";}
                 DestroyWindow(hwnd);
+                break;
+            }
+            case IDC_BUTTON_ADD_FILE: {
+                OPENFILENAME ofn = { sizeof(OPENFILENAME) };
+                wchar_t szFile[32768] = { 0 };
+                ofn.hwndOwner = hwnd;
+                ofn.lpstrFile = szFile;
+                ofn.nMaxFile = sizeof(szFile) / sizeof(wchar_t);
+                ofn.lpstrFilter = L"所有文件\0*.*\0";
+                ofn.Flags = OFN_ALLOWMULTISELECT | OFN_FILEMUSTEXIST | OFN_HIDEREADONLY;
+                if (GetOpenFileName(&ofn)) {
+                    // 解析多选文件
+                    wchar_t* p = szFile;
+                    std::wstring dir = p;
+                    p += wcslen(p) + 1;
+                    if (*p == 0) {
+                        // 单选
+                        AddPathToHighTrustList(dir, false);
+                    } else {
+                        while (*p) {
+                            std::wstring fullPath = dir + L"\\" + p;
+                            AddPathToHighTrustList(fullPath, false);
+                            p += wcslen(p) + 1;
+                        }
+                    }
+                }
+                break;
+            }
+            case IDC_BUTTON_ADD_FOLDER: {
+                BROWSEINFO bi = { 0 };
+                bi.hwndOwner = hwnd;
+                bi.lpszTitle = L"请选择要添加的文件夹";
+                bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
+                LPITEMIDLIST pidl = SHBrowseForFolder(&bi);
+                if (pidl) {
+                    wchar_t folderPath[MAX_PATH];
+                    if (SHGetPathFromIDList(pidl, folderPath)) {
+                        AddPathToHighTrustList(folderPath, true);
+                    }
+                    CoTaskMemFree(pidl);
+                }
+                break;
+            }
+            case IDC_BUTTON_EDIT_MALICIOUS: {
+                std::wstring filePath = g_baseDir + L"\\WhiteList\\malicious.txt";
+                ShellExecute(NULL, L"open", L"notepad.exe", filePath.c_str(), NULL, SW_SHOW);
+                break;
+            }
+            case IDC_BUTTON_EDIT_WHITELIST: {
+                std::wstring filePath = g_baseDir + L"\\WhiteList\\whitelist.txt";
+                ShellExecute(NULL, L"open", L"notepad.exe", filePath.c_str(), NULL, SW_SHOW);
+                break;
+            }
+            case IDC_BUTTON_EDIT_TLS: {
+                std::wstring filePath = g_baseDir + L"\\WhiteList\\tls_fingerprints.txt";
+                ShellExecute(NULL, L"open", L"notepad.exe", filePath.c_str(), NULL, SW_SHOW);
+                break;
+            }
+            case IDC_BUTTON_RESTORE_ISOL: {
+                // 弹出文件选择对话框，默认定位到 .\ISOL
+                OPENFILENAME ofn = { sizeof(OPENFILENAME) };
+                wchar_t szFile[MAX_PATH] = { 0 };
+                ofn.hwndOwner = hwnd;
+                ofn.lpstrFile = szFile;
+                ofn.nMaxFile = MAX_PATH;
+                ofn.lpstrFilter = L"隔离文件 (*.isol)\0*.isol\0";
+                ofn.lpstrInitialDir = (g_baseDir + L"\\ISOL").c_str();  // 初始目录
+                ofn.Flags = OFN_FILEMUSTEXIST | OFN_HIDEREADONLY | OFN_NOCHANGEDIR;
+
+                if (GetOpenFileName(&ofn)) {
+                    std::wstring selectedFile = szFile;
+                    // 提取文件名（不含路径）
+                    size_t pos = selectedFile.find_last_of(L"\\");
+                    std::wstring fileName = (pos != std::wstring::npos) ? selectedFile.substr(pos + 1) : selectedFile;
+                    // 去除 .isol 后缀
+                    std::wstring baseName = fileName;
+                    size_t dotPos = baseName.find_last_of(L'.');
+                    if (dotPos != std::wstring::npos && baseName.substr(dotPos) == L".isol") {
+                        baseName = baseName.substr(0, dotPos);
+                    }
+                    // 构造命令行
+                    std::wstring cmd = L"\"" + g_baseDir + L"\\isol.exe\" extract \"" + g_baseDir + L"\\ISOL\" \"" + baseName + L"\" * @pASs7W#Ord";
+                    STARTUPINFO si = { sizeof(si) };
+                    PROCESS_INFORMATION pi;
+                    if (CreateProcess(NULL, (LPWSTR)cmd.c_str(), NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+                        CloseHandle(pi.hProcess);
+                        CloseHandle(pi.hThread);
+                    }
+                }
                 break;
             }
             case IDC_EXTRA_BUTTON: {
