@@ -111,6 +111,8 @@ AppDir\
 ├── TaskScheduler.exe              # 计划任务变更监控
 ├── User_UI.exe                    # 用户决策界面（系统托盘 + 告警弹窗）
 ├── ZIPanalyzer.exe                # 压缩包分析（解压后调用 Fileanalyzer）
+├── PersistentProcessTerminator.exe# (可选)强制结束用户态顽固进程
+├── ForceDelete.exe                # (可选)强制删除顽固文件
 └── ...（运行所需的 .dll 文件）
 
 核心文件说明：
@@ -318,6 +320,73 @@ A：traverseallfiles.exe 会直接删除被判定为恶意的 PE/脚本文件，
 
 Q：如何获取当前运行状态摘要？
 A：在 User_UI 主窗口可看到各模块的 PID、CPU、内存占用，以及最后一条告警信息。
+
+
+11. 辅助工具（高级）
+-------------------------------------------------------------------------------
+本系统提供了两个用于处理顽固进程或文件的辅助工具：ForceDelete 和 PersistentProcessTerminator。
+这两个工具并非核心防护组件，仅在常规手段无法清除特定进程或文件时按需使用。
+
+**重要提示**：这两个工具操作底层系统资源，**不推荐大规模或频繁使用**，应仅用于**定点清除顽固进程/文件**。
+使用前请充分理解其工作原理和局限性，并确保重要数据已备份。
+
+**注意**：这两个辅助工具仅提供命令行版本，若有需要可自行扩展至User_UI。
+
+11.1 ForceDelete.exe —— 顽固文件删除工具
+用途：
+  强制删除被其他进程占用、权限受限或处于锁定状态的文件，例如被恶意软件锁定的文件、
+  无法通过资源管理器删除的残留文件。
+
+使用方法（管理员命令行）：
+  ForceDelete.exe <完整文件路径>
+  示例：ForceDelete.exe C:\Malware\locked.dll
+
+工作原理：
+  1. 启用 SeTakeOwnershipPrivilege 和 SeRestorePrivilege 等特权。
+  2. 尝试获取文件所有权并设置当前用户的完全控制权限。
+  3. 若文件被占用，通过 Restart Manager 获取占用进程列表。
+  4. 尝试结束占用进程（优先调用 KillProcessService 服务，若失败则直接 TerminateProcess）。
+  5. 对系统进程 explorer.exe 会尝试终止并重启，但不会结束其他系统关键进程。
+  6. 若常规删除失败，使用 MoveFileEx 将文件标记为重启时删除。
+
+局限性：
+  - 无法删除处于系统保护中的文件（如 Windows 核心系统文件）。
+  - 若占用进程为 PPL（受保护进程）或内核级进程，可能无法终止。
+  - 需要管理员权限，且依赖 SeDebugPrivilege 等特权，可能受组策略限制。
+  - 使用 MoveFileEx 延迟删除需要重启系统才能生效。
+
+
+11.2 PersistentProcessTerminator.exe —— 进程终止服务
+用途：
+  作为 Windows 服务（KillProcessService）运行，用于强制终止顽固进程及其进程树，
+  尤其适用于被恶意软件保护、拒绝响应的进程。
+
+安装与使用：
+  首次安装（管理员命令行）：
+    sc create KillProcessService binPath ="%ExecutablePath%\PersistentProcessTerminator.exe"
+    注意：%ExecutablePath%应替换为程序实际目录（如：AppDir\）
+  安装后，可通过服务启动终止指定 PID：
+    sc start KillProcessService <进程PID>
+  卸载服务：
+    sc delete KillProcessService
+
+工作原理：
+  1. 启用 SeDebugPrivilege。
+  2. 尝试清除目标进程的 ProcessBreakOnTermination 标志（防止系统蓝屏保护）。
+  3. 若目标进程在作业对象中，尝试终止整个作业。
+  4. 依次调用 TerminateProcess、taskkill /f、wmic process delete 和 NtTerminateProcess。
+  5. 若指定 PID，还会递归终止其所有子进程（进程树），并循环清理守护进程（最多重试 5 次）。
+
+局限性：
+  - 无法结束 PPL（受保护进程）和需要内核驱动才能终止的进程。
+  - 若关键系统 API（如 NtTerminateProcess）被恶意 HOOK，工具可能失效。
+  - 强制终止进程可能导致该进程未保存的数据丢失，或引起系统不稳定。
+  - 不应用于终止系统关键进程（如 csrss.exe、winlogon.exe 等），否则可能引发蓝屏。
+
+不推荐大规模使用的原因：
+  这两个工具采用强力终止和删除手段，可能对系统稳定性造成影响，并可能误杀正常进程
+  或删除正在使用的文件。仅在遭遇顽固恶意软件，且常规 EDR 响应措施（如沙箱隔离、
+  进程挂起）无效时，才应考虑定点使用。建议在安全研究人员指导下操作。
 
 
 11. 免责声明与许可证

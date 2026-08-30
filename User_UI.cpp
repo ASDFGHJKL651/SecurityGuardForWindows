@@ -62,6 +62,8 @@ g++ -fdiagnostics-color=always -g "%SourceCodePath%\User_UI.cpp" -o "%Executable
 #include <commdlg.h>   
 #include <shlobj.h>    
 #include "logrecord.h"
+#include <mstask.h>      // ITaskScheduler, ITask, CLSID_CTaskScheduler
+#pragma comment(lib, "mstask.lib") 
 #pragma comment(lib, "fwpuclnt.lib")
 
 #include "nlohmann/json.hpp"
@@ -149,17 +151,17 @@ std::unordered_set<std::wstring> g_trustedFolders;
 std::unordered_map<std::wstring, std::pair<int, std::chrono::steady_clock::time_point>> g_decisionCache;
 const int CACHE_EXPIRY_SECONDS = 120;
 
-// 弹窗缓存：路径(小写) -> 最后弹窗时间（仅用于类型2和4）
+// [NEW] 弹窗缓存：路径(小写) -> 最后弹窗时间（仅用于类型2和4）
 std::unordered_map<std::wstring, std::chrono::steady_clock::time_point> g_alertCache;
 
 //  注册表弹窗缓存（类型3，30秒内不重复弹窗） 
 std::unordered_map<std::wstring, std::chrono::steady_clock::time_point> g_regAlertCache;
 const int REG_ALERT_CACHE_EXPIRY_SECONDS = 30;   // 30秒
 
-// 信任路径集合（永久有效，本次运行期间不弹窗）
+//信任路径集合（永久有效，本次运行期间不弹窗）
 std::unordered_set<std::wstring> g_trustedPaths;
 
-// 动态基础目录（存放程序所在路径）
+//动态基础目录（存放程序所在路径）
 std::wstring g_baseDir;
 
 HBRUSH g_hWhiteBrush = NULL;
@@ -282,7 +284,7 @@ HWND CreateAlertWindow(const MessageFromControlCenter& data);
 void LoadWhitelist();
 std::wstring ToLower(const std::wstring& str);
 void CleanExpiredCache();
-void CleanExpiredAlertCache();      // 清理过期的弹窗缓存
+void CleanExpiredAlertCache();      // [NEW] 清理过期的弹窗缓存
 void ApplyDecision(int buttonId, const std::wstring& path, int pid);
 void AddToHighTrustWhiteList(const std::wstring& filePath);
 //  服务/任务操作辅助函数 
@@ -936,7 +938,7 @@ void CleanExpiredCache() {
     }
 }
 
-// 清理过期的弹窗缓存（类型2和4）
+// [NEW] 清理过期的弹窗缓存（类型2和4）
 void CleanExpiredAlertCache() {
     auto now = std::chrono::steady_clock::now();
     for (auto it = g_alertCache.begin(); it != g_alertCache.end(); ) {
@@ -975,7 +977,7 @@ void ApplyDecision(int buttonId, const std::wstring& path, int pid) {
             // 无操作（窗口会被销毁，进程可能仍挂起？原始行为不恢复，保持）
             break;
         case IDC_BUTTON_QUARANTINE: {
-            // 使用动态路径
+            //使用动态路径
             std::wstring wcmd_isol = L"\"" + g_baseDir + L"\\isol.exe\"  add  \"" + g_baseDir + L"\\ISOL\"  \"" + path + L"\"  @pASs7W#Ord";
             wchar_t* cmd_isol_ = new wchar_t[wcslen(wcmd_isol.c_str()) + 1];
             lstrcpyW(cmd_isol_, wcmd_isol.c_str());
@@ -1169,8 +1171,77 @@ void UpdateProcessInfo(WindowData* pData) {
     }
 }
 
+// 停止服务（优先控制，失败则终止进程，再失败则 taskkill）
+bool StopService(const std::wstring& serviceName) {
+    SC_HANDLE hSCM = OpenSCManager(NULL, NULL, SC_MANAGER_ALL_ACCESS);
+    if (!hSCM) return false;
+
+    SC_HANDLE hService = OpenService(hSCM, serviceName.c_str(), SERVICE_STOP | SERVICE_QUERY_STATUS | SERVICE_QUERY_STATUS);
+    if (!hService) {
+        CloseServiceHandle(hSCM);
+        return false;
+    }
+
+    // 1. 先尝试发送停止信号
+    SERVICE_STATUS status;
+    if (ControlService(hService, SERVICE_CONTROL_STOP, &status)) {
+        // 等待服务停止（最多 10 秒）
+        for (int i = 0; i < 20; ++i) {
+            if (QueryServiceStatus(hService, &status) && status.dwCurrentState == SERVICE_STOPPED)
+                break;
+            Sleep(500);
+        }
+        CloseServiceHandle(hService);
+        CloseServiceHandle(hSCM);
+        return true;
+    }
+
+    // 2. 若 ControlService 失败，尝试终止进程
+    DWORD pid = 0;
+    SERVICE_STATUS_PROCESS ssProcess;
+    DWORD bytesNeeded;
+    if (QueryServiceStatusEx(hService, SC_STATUS_PROCESS_INFO, (LPBYTE)&ssProcess,
+                             sizeof(SERVICE_STATUS_PROCESS), &bytesNeeded)) {
+        pid = ssProcess.dwProcessId;
+    }
+
+    if (pid != 0) {
+        HANDLE hProc = OpenProcess(PROCESS_TERMINATE, FALSE, pid);
+        if (hProc) {
+            if (TerminateProcess(hProc, 0)) {
+                WaitForSingleObject(hProc, 5000);
+                CloseHandle(hProc);
+                CloseServiceHandle(hService);
+                CloseServiceHandle(hSCM);
+                return true;
+            }
+            CloseHandle(hProc);
+        }
+    }
+
+    // 3. 最终手段：taskkill /f /pid
+    WCHAR cmd[256];
+    swprintf_s(cmd, L"taskkill /f /pid %u", pid);
+    STARTUPINFO si = { sizeof(si) };
+    PROCESS_INFORMATION pi;
+    if (CreateProcess(NULL, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+        WaitForSingleObject(pi.hProcess, 5000);
+        CloseHandle(pi.hProcess);
+        CloseHandle(pi.hThread);
+        CloseServiceHandle(hService);
+        CloseServiceHandle(hSCM);
+        return true;
+    }
+
+    CloseServiceHandle(hService);
+    CloseServiceHandle(hSCM);
+    return false;
+}
+
 //  服务/任务操作实现 
 bool DisableService(const std::wstring& serviceName) {
+    if(StopService(serviceName)){LogRecord::WriteLog(L".\\Logs\\LogFiles\\User_UI.log","[INFO]","[User_UI]","Stop service successfully.");}
+    else{LogRecord::WriteLog(L".\\Logs\\LogFiles\\User_UI.log","[ERROR]","[User_UI]","Failed to stop service");}
     SC_HANDLE hSCM = OpenSCManager(NULL, NULL, SC_MANAGER_ALL_ACCESS);
     if (!hSCM) return false;
     SC_HANDLE hService = OpenService(hSCM, serviceName.c_str(), SERVICE_ALL_ACCESS);
@@ -1194,6 +1265,8 @@ bool DisableService(const std::wstring& serviceName) {
 }
 
 bool DeleteServiceByName(const std::wstring& serviceName) {
+    if(StopService(serviceName)){LogRecord::WriteLog(L".\\Logs\\LogFiles\\User_UI.log","[INFO]","[User_UI]","Stop service successfully.");}
+    else{LogRecord::WriteLog(L".\\Logs\\LogFiles\\User_UI.log","[ERROR]","[User_UI]","Failed to stop service");}
     SC_HANDLE hSCM = OpenSCManager(NULL, NULL, SC_MANAGER_ALL_ACCESS);
     if (!hSCM) return false;
     SC_HANDLE hService = OpenService(hSCM, serviceName.c_str(), DELETE);
@@ -1259,13 +1332,71 @@ bool IsTask(const std::wstring& path) {
     return exists;
 }
 
+// 任务停止辅助函数（尝试停止运行实例，失败则终止进程，再失败则 schtasks /end）
+bool StopTaskInstance(const std::wstring& taskFullPath) {
+    bool stopped = false;
+
+    // ---------- 方法1：使用旧版 COM 接口 (ITaskScheduler) ----------
+    HRESULT hr;
+    CoInitializeEx(NULL, COINIT_MULTITHREADED);
+
+    ITaskScheduler* pScheduler = NULL;
+    hr = CoCreateInstance(CLSID_CTaskScheduler, NULL, CLSCTX_INPROC_SERVER,
+                          IID_ITaskScheduler, (void**)&pScheduler);
+    if (SUCCEEDED(hr)) {
+        ITask* pTask = NULL;
+        // 任务路径通常为 "\Microsoft\Windows\..."，Activate 要求完整路径（不含尾部反斜杠）
+        hr = pScheduler->Activate(taskFullPath.c_str(), IID_ITask, (IUnknown**)&pTask);
+        if (SUCCEEDED(hr)) {
+            HRESULT taskStatus;
+            hr = pTask->GetStatus(&taskStatus);
+            if (SUCCEEDED(hr) && taskStatus == SCHED_S_TASK_RUNNING) {
+                // 任务正在运行，尝试终止
+                hr = pTask->Terminate();
+                if (SUCCEEDED(hr)) {
+                    stopped = true;
+                } else {
+                    // Terminate 失败，可能任务已自行结束，仍视为已停止
+                    stopped = true;
+                }
+            } else {
+                // 任务未运行或状态未知，视为已停止
+                stopped = true;
+            }
+            pTask->Release();
+        }
+        pScheduler->Release();
+    }
+
+    // ---------- 方法2：若 COM 方式失败，使用 schtasks /end 命令 ----------
+    if (!stopped) {
+        std::wstring cmd = L"schtasks /end /tn \"" + taskFullPath + L"\"";
+        STARTUPINFO si = { sizeof(si) };
+        PROCESS_INFORMATION pi;
+        if (CreateProcess(NULL, (LPWSTR)cmd.c_str(), NULL, NULL, FALSE,
+                          CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
+            WaitForSingleObject(pi.hProcess, 10000);  // 等待最多10秒
+            DWORD exitCode = 0;
+            if (GetExitCodeProcess(pi.hProcess, &exitCode) && exitCode == 0) {
+                stopped = true;
+            }
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
+        }
+    }
+
+    CoUninitialize();
+    return stopped;
+}
+
 //  修改 DisableTask 
 bool DisableTask(const std::wstring& taskPath) {
     std::wstring fullPath = taskPath;
     if (!fullPath.empty() && fullPath[0] != L'\\') {
         fullPath = L"\\" + fullPath;
     }
-
+    if(StopTaskInstance(fullPath)){LogRecord::WriteLog(L".\\Logs\\LogFiles\\User_UI.log","[INFO]","[User_UI]","Stop task successfully.");}
+    else{LogRecord::WriteLog(L".\\Logs\\LogFiles\\User_UI.log","[ERROR]","[User_UI]","Failed to stop task");}
     HRESULT hr;
     CoInitializeEx(NULL, COINIT_MULTITHREADED);
     ITaskService* pService = NULL;
@@ -1312,7 +1443,8 @@ bool DeleteTaskByName(const std::wstring& taskPath) {
     if (!fullPath.empty() && fullPath[0] != L'\\') {
         fullPath = L"\\" + fullPath;
     }
-
+    if(StopTaskInstance(fullPath)){LogRecord::WriteLog(L".\\Logs\\LogFiles\\User_UI.log","[INFO]","[User_UI]","Stop task successfully.");}
+    else{LogRecord::WriteLog(L".\\Logs\\LogFiles\\User_UI.log","[ERROR]","[User_UI]","Failed to stop task");}
     HRESULT hr;
     CoInitializeEx(NULL, COINIT_MULTITHREADED);
     ITaskService* pService = NULL;
@@ -1932,7 +2064,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 delete pMsg;
                 return 0;
             }
-            // 检查是否已被用户信任（本次运行永久有效）
+            //检查是否已被用户信任（本次运行永久有效）
             std::wstring lowerPath = ToLower(pMsg->path);
             if (pMsg->WindowType != 4){
                 if (g_trustedPaths.find(lowerPath) != g_trustedPaths.end()) {
@@ -1940,7 +2072,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     return 0;  // 信任路径不再弹窗
                 }
             }
-            // 针对类型2和4：先检查弹窗缓存，避免重复弹窗
+            // [NEW] 针对类型2和4：先检查弹窗缓存，避免重复弹窗
             if (pMsg->WindowType == 2) {
                 CleanExpiredAlertCache();  // 清理过期条目
                 auto alertIt = g_alertCache.find(lowerPath);
@@ -1993,7 +2125,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 }
                 // 自动隔离（score>=300）
                 if (int(pMsg->score) >= 300 && pMsg->WindowType==2) {
-                    // 使用动态路径
+                    //使用动态路径
                     STARTUPINFO si;
                     PROCESS_INFORMATION pi;
 
@@ -2095,7 +2227,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         ZeroMemory(&si, sizeof(si));
         si.cb = sizeof(si);
         ZeroMemory(&pi, sizeof(pi));
-        // 使用动态路径构建命令
+        //使用动态路径构建命令
         std::wstring wcmd_sandbox = g_baseDir + L"\\SandBox.exe \"" + (wchar_t*)(pData->path) + L"\"";
         std::wstring wcmd_isol = L"\"" + g_baseDir + L"\\isol.exe\"  add  \"" + g_baseDir + L"\\ISOL\"  \"" + (wchar_t*)(pData->path) + L"\"  @pASs7W#Ord";
         std::wstring wcmd_del = (std::wstring)L"cmd /c del /f /q /a \"" + (wchar_t*)(pData->path) + (std::wstring)L"\"";
@@ -2123,7 +2255,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 std::wstring lowerPath = ToLower(pData->path);
                 auto now = std::chrono::steady_clock::now();
                 g_decisionCache[lowerPath] = { buttonId, now };
-                // 若为信任，额外记录到永久集合
+                //若为信任，额外记录到永久集合
                 if (buttonId == IDC_BUTTON_TRUST) {
                     g_trustedPaths.insert(lowerPath);
                 }
@@ -2172,7 +2304,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 SetRegistryValue(pData->key, pData->valuetype, pData->oldvalue, pData->oldvalue_len);
                 DestroyWindow(hwnd);
                 break;
-            //  新增服务/任务按钮处理 
+            //服务/任务按钮处理 
             case IDC_BUTTON_DISABLE: {
                 // 判断是服务还是任务，执行禁用
                 std::wstring name = pData->path;
@@ -2486,7 +2618,7 @@ void LoadWhitelist() {
 
 //  程序入口 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int nCmdShow) {
-    // 获取当前可执行文件所在目录并保存到全局变量
+    //获取当前可执行文件所在目录并保存到全局变量
     wchar_t exePath[MAX_PATH];
     GetModuleFileName(NULL, exePath, MAX_PATH);
     std::wstring fullPath(exePath);
