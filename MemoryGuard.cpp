@@ -52,6 +52,7 @@ g++.exe -fdiagnostics-color=always -g "%SourceCodePath%\MemoryGuard.cpp" -o "%Ex
 #include <set> 
 #include "nlohmann/json.hpp"
 #include "shutdown_handler.h"
+#include "logrecord.h"
 
 using json = nlohmann::json;
 
@@ -5733,10 +5734,13 @@ int main(int argc, char* argv[]) {
 
     if (!EnableDebugPrivilege()) {
         wprintf(L"Warning: Failed to enable debug privilege.\n");
+        LogRecord::WriteLog(L".\\Logs\\LogFiles\\MemoryGuard.log","[ERROR]","[MemoryGuard]","Failed to enable debug privilege.");
     }
     SetProcessShutdownParameters(0x100, 0);
     InstallShutdownHandler();
-    SetProcessCritical(true);
+    if(!SetProcessCritical(true)){
+        LogRecord::WriteLog(L".\\Logs\\LogFiles\\MemoryGuard.log","[ERROR]","[MemoryGuard]","Failed to set process critical.");
+    }
     SetConsoleCtrlHandler(ConsoleCtrlHandler, TRUE);
 
     g_hExitEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);   // 手动重置事件
@@ -5826,6 +5830,7 @@ int main(int argc, char* argv[]) {
     g_pProp = (EVENT_TRACE_PROPERTIES*)malloc(bufferSize);
     if (!g_pProp) {
         wprintf(L"[-] Memory allocation failed for ETW properties.\n");
+        LogRecord::WriteLog(L".\\Logs\\LogFiles\\MemoryGuard.log","[ERROR]","[MemoryGuard]","Memory allocation failed for ETW properties.");
         g_StopRequested = true;
         if (g_NetworkThread.joinable()) g_NetworkThread.join();
         if (g_ActiveScanThread.joinable()) g_ActiveScanThread.join();
@@ -5852,6 +5857,7 @@ int main(int argc, char* argv[]) {
     ULONG status = StartTraceW(&g_SessionHandle, SessionName, g_pProp);
     if (status != ERROR_SUCCESS) {
         wprintf(L"[-] StartTrace failed: 0x%08lx\n", status);
+        LogRecord::WriteLog(L".\\Logs\\LogFiles\\MemoryGuard.log","[ERROR]","[MemoryGuard]","StartTrace failed");
         free(g_pProp);
         g_StopRequested = true;
         if (g_NetworkThread.joinable()) g_NetworkThread.join();
@@ -5868,6 +5874,7 @@ int main(int argc, char* argv[]) {
                             TRACE_LEVEL_INFORMATION, 0, 0, 0, NULL);
     if (status != ERROR_SUCCESS) {
         wprintf(L"[-] EnableTraceEx2 for process failed: 0x%08lx\n", status);
+        LogRecord::WriteLog(L".\\Logs\\LogFiles\\MemoryGuard.log","[ERROR]","[MemoryGuard]","EnableTraceEx2 for process failed");
         ControlTraceW(g_SessionHandle, SessionName, g_pProp, EVENT_TRACE_CONTROL_STOP);
         free(g_pProp);
         g_StopRequested = true;
@@ -5884,6 +5891,7 @@ int main(int argc, char* argv[]) {
                             TRACE_LEVEL_INFORMATION, 0, 0, 0, NULL);
     if (status != ERROR_SUCCESS) {
         wprintf(L"[-] EnableTraceEx2 for image failed: 0x%08lx\n", status);
+        LogRecord::WriteLog(L".\\Logs\\LogFiles\\MemoryGuard.log","[ERROR]","[MemoryGuard]","EnableTraceEx2 for image failed");
     } else {
         wprintf(L"[+] Kernel-Image provider enabled.\n");
     }
@@ -5911,6 +5919,7 @@ int main(int argc, char* argv[]) {
     g_ThreadPool = CreateThreadpool(NULL);
     if (!g_ThreadPool) {
         wprintf(L"[-] CreateThreadpool failed.\n");
+        LogRecord::WriteLog(L".\\Logs\\LogFiles\\MemoryGuard.log","[ERROR]","[MemoryGuard]","CreateThreadpool failed.");
         ControlTraceW(g_SessionHandle, SessionName, g_pProp, EVENT_TRACE_CONTROL_STOP);
         free(g_pProp);
         g_StopRequested = true;
@@ -5936,6 +5945,7 @@ int main(int argc, char* argv[]) {
     g_TraceHandle = OpenTraceW(&logfile);
     if (g_TraceHandle == INVALID_PROCESSTRACE_HANDLE) {
         wprintf(L"[-] OpenTrace failed.\n");
+        LogRecord::WriteLog(L".\\Logs\\LogFiles\\MemoryGuard.log","[ERROR]","[MemoryGuard]","OpenTrace failed.");
         ControlTraceW(g_SessionHandle, SessionName, g_pProp, EVENT_TRACE_CONTROL_STOP);
         free(g_pProp);
         CloseThreadpool(g_ThreadPool);

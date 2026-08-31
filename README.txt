@@ -1,13 +1,8 @@
 ================================================================================
                         Security Guard for Windows
                           端点检测与响应系统（EDR）
-                       版本：1.0-test | 最后更新：2026-08-29
+                       版本：1.0.0 | 最后更新：2026-08-31
 ================================================================================
-
-**** 重要提示 ****
-本版本为测试版（TEST），仅供安全研究与功能验证使用，不建议在生产环境中部署。
-测试过程中可能存在未知缺陷、误报或系统不稳定性，使用者应自行承担全部风险。
-请务必在测试环境中充分验证后再考虑生产使用。
 
 1. 概述
 -------------------------------------------------------------------------------
@@ -66,67 +61,69 @@ AppDir\WinPE\Executable\
 -------------------------------------------------------------------------------
 AppDir\
 ├── 7-zip\
-│   └── 7z.exe                     # 解压工具（需手动放置）
-├── Backup\                        # 程序备份（恢复被篡改的文件）
-├── ISOL\                          # 加密隔离文件存储（自动创建）
-├── Logs\                          # XML 分析日志（自动创建）
-├── system_service_config\         # 系统服务快照（SystemService 组件创建）
-├── taskscheduler_config\          # 计划任务快照（TaskScheduler 组件创建）
-├── Temp\                          # 临时文件（自动创建）
+│   └── 7z.exe                      # 解压工具（需手动放置）
+├── Backup\                         # 程序备份（恢复被篡改的文件）
+├── ISOL\                           # 加密隔离文件存储（自动创建）
+├── Logs\                           # XML 分析日志（自动创建）
+├── system_service_config\          # 系统服务快照（SystemService 组件创建）
+├── taskscheduler_config\           # 计划任务快照（TaskScheduler 组件创建）
+├── Temp\                           # 临时文件（自动创建）
 ├── Verification\
 │   ├── Configuration\
-│   │   └── HashValue.json         # 加密存储的 SHA‑256 哈希（由 CreateHash.exe 生成）
-│   ├── CreateHash.exe             # 哈希生成工具（生成后建议删除）
-│   ├── Launcher.exe               # 创建开机计划任务（仅需运行一次）
-│   ├── Verification.exe           # 开机自启动校验程序（系统入口）
+│   │   └── HashValue.json          # 加密存储的 SHA‑256 哈希（由 CreateHash.exe 生成）
+│   ├── CreateHash.exe              # 哈希生成工具（生成后建议删除）
+│   ├── Launcher.exe                # 创建开机计划任务（仅需运行一次）
+│   ├── Verification.exe            # 开机自启动校验程序（系统入口）
 │   └── ...（运行所需的 .dll 文件）
 ├── WhiteList\
-│   ├── malicious.txt              # 恶意IP/域名黑名单
-│   ├── tls_fingerprints.txt       # 恶意 TLS Client Hello 的JA3/MD5指纹
-│   ├── whitelist.txt              # IP/域名白名单
-│   └── HighTrustWhiteList.json    # 高信任白名单（文件及目录）
+│   ├── malicious.txt               # 恶意IP/域名黑名单
+│   ├── tls_fingerprints.txt        # 恶意 TLS Client Hello 的JA3/MD5指纹
+│   ├── whitelist.txt               # IP/域名白名单
+│   └── HighTrustWhiteList.json     # 高信任白名单（文件及目录）
 ├── WinPE\
-│   ├── WinPE.iso                  # WinPE 镜像（需自行准备）
-│   └── Executable\                # WinPE 环境下运行的工具
+│   ├── WinPE.iso                   # WinPE 镜像（需自行准备）
+│   └── Executable\                 # WinPE 环境下运行的工具
 │       ├── CMDanalyzer_forWinPE.exe
 │       ├── PEanalyzer_forWinPE.exe
 │       ├── traverseallfiles.exe
 │       └── ...（运行所需的 .dll 文件）
-├── CMDanalyzer.exe                # 脚本（.bat/.cmd/.ps1）分析器
-├── ControlCenter.exe              # 消息汇聚与路由中枢（必需）
-├── DelFromZip.exe                 # 从压缩包中删除指定文件
-├── Fileanalyzer.exe               # 文件类型识别与路由
-├── FileSystemMonitor.exe          # 文件系统监控（USN Journal）
-├── isol.exe                       # AES‑256 文件加密隔离工具
-├── Lnkanalyzer.exe                # LNK 快捷方式分析器
-├── MemoryGuard.exe                # 内存行为监控与检测（核心）
-├── NetworkGuard.exe               # 网络流量监控
-├── OLEanalyzer.exe                # OLE2 文档分析（旧版 Office）
-├── PDFanalyzer.exe                # PDF 文件分析
-├── PEanalyzer.exe                 # PE 可执行文件深度分析（核心）
-├── RegistryMonitor.exe            # 注册表变更监控
-├── RestartInWinPE.exe             # 配置下次重启进入 WinPE（用户手动启动）
-├── SandBox.exe                    # 进程沙箱（受限令牌 + 作业对象）
-├── SystemService.exe              # 系统服务变更监控
-├── TaskScheduler.exe              # 计划任务变更监控
-├── User_UI.exe                    # 用户决策界面（系统托盘 + 告警弹窗）
-├── ZIPanalyzer.exe                # 压缩包分析（解压后调用 Fileanalyzer）
-├── PersistentProcessTerminator.exe# (可选)强制结束用户态顽固进程
-├── ForceDelete.exe                # (可选)强制删除顽固文件
+├── CMDanalyzer.exe                 # 脚本（.bat/.cmd/.ps1）分析器
+├── ControlCenter.exe               # 消息汇聚与路由中枢（必需）
+├── DelFromZip.exe                  # 从压缩包中删除指定文件
+├── Fileanalyzer.exe                # 文件类型识别与路由
+├── FileSystemMonitor.exe           # 文件系统监控（USN Journal）
+├── isol.exe                        # AES‑256 文件加密隔离工具
+├── Lnkanalyzer.exe                 # LNK 快捷方式分析器
+├── MemoryGuard.exe                 # 内存行为监控与检测（核心）
+├── NetworkGuard.exe                # 网络流量监控
+├── OLEanalyzer.exe                 # OLE2 文档分析（旧版 Office）
+├── PDFanalyzer.exe                 # PDF 文件分析
+├── PEanalyzer.exe                  # PE 可执行文件深度分析（核心）
+├── RegistryMonitor.exe             # 注册表变更监控
+├── RestartInWinPE.exe              # 配置下次重启进入 WinPE（用户手动启动）
+├── SandBox.exe                     # 进程沙箱（受限令牌 + 作业对象）
+├── SystemService.exe               # 系统服务变更监控
+├── TaskScheduler.exe               # 计划任务变更监控
+├── User_UI.exe                     # 用户决策界面（系统托盘 + 告警弹窗）
+├── ZIPanalyzer.exe                 # 压缩包分析（解压后调用 Fileanalyzer）
+├── PersistentProcessTerminator.exe # (可选)在用户态强制结束顽固进程
+├── ForceDelete.exe                 # (可选)强制删除顽固文件
 └── ...（运行所需的 .dll 文件）
 
 核心文件说明：
-  Verification.exe      启动入口 + 完整性校验          必须
-  ControlCenter.exe     消息总线，协调各组件            必须
-  User_UI.exe           用户交互界面                    必须
-  MemoryGuard.exe       内存恶意行为检测                必须（核心防护）
-  FileSystemMonitor.exe 文件写入/修改监控              必须
-  NetworkGuard.exe      网络流量检测                    推荐
-  RegistryMonitor.exe   注册表持久化监控                推荐
-  SystemService.exe     服务变更监控                    推荐
-  TaskScheduler.exe     计划任务监控                    推荐
-  CreateHash.exe        一次性哈希生成工具              仅部署/更新时使用
-  RestartInWinPE.exe    WinPE 救援（按需）              按需使用
+  Verification.exe                 启动入口 + 完整性校验           必须
+  ControlCenter.exe                消息总线，协调各组件            必须
+  User_UI.exe                      用户交互界面                    必须
+  MemoryGuard.exe                  内存恶意行为检测                必须（核心防护）
+  FileSystemMonitor.exe            文件写入/修改监控               必须
+  NetworkGuard.exe                 网络流量检测                    推荐
+  RegistryMonitor.exe              注册表持久化监控                推荐
+  SystemService.exe                服务变更监控                    推荐
+  TaskScheduler.exe                计划任务监控                    推荐
+  CreateHash.exe                   一次性哈希生成工具              仅部署/更新时使用
+  RestartInWinPE.exe               WinPE 救援（按需）              按需使用
+  PersistentProcessTerminator.exe  在用户态强制结束顽固进程工具     可选
+  ForceDelete.exe                  强制删除顽固文件                可选
 
 5. 编译指南
 -------------------------------------------------------------------------------
@@ -233,6 +230,7 @@ AppDir\
   - 各分析器（PEanalyzer、CMDanalyzer 等）生成的详细报告以 XML 格式保存在 Logs\ 目录。
   - 每个监控模块的控制台输出（默认隐藏）可通过附加启动参数 --withoutUi 或 --onlywithUi
     临时调整（需手动从命令行启动）。
+  - 部分监控模块、响应模块会在 Logs\LogFiles\ 目录中以 LOG 格式生成操作日志、错误日志。
 
 7.3 更新程序
   1. 停止所有模块（通过 User_UI 退出）。
@@ -319,7 +317,7 @@ A：traverseallfiles.exe 会直接删除被判定为恶意的 PE/脚本文件，
    使用前请务必备份重要数据。
 
 Q：如何获取当前运行状态摘要？
-A：在 User_UI 主窗口可看到各模块的 PID、CPU、内存占用，以及最后一条告警信息。
+A：在 User_UI 主窗口可看到各模块的 PID、CPU、内存占用。
 
 
 11. 辅助工具（高级）
@@ -330,7 +328,7 @@ A：在 User_UI 主窗口可看到各模块的 PID、CPU、内存占用，以及
 **重要提示**：这两个工具操作底层系统资源，**不推荐大规模或频繁使用**，应仅用于**定点清除顽固进程/文件**。
 使用前请充分理解其工作原理和局限性，并确保重要数据已备份。
 
-**注意**：这两个辅助工具仅提供命令行版本，若有需要可自行扩展至User_UI。
+**注意**：这两个辅助工具仅提供命令行版本，若有需要可自行扩展UI操作界面。
 
 11.1 ForceDelete.exe —— 顽固文件删除工具
 用途：
@@ -402,8 +400,9 @@ AI 生成声明：
   本软件仅供安全研究和防御实践使用。使用者应自行承担因部署和使用本软件带来的
   一切风险，开发者不对任何直接或间接损失负责。
 
-许可证：
-  本程序仅供安全研究与内部使用，未经授权不得用于商业用途。
+
+
+                本程序仅供安全研究与内部使用，未经授权不得用于商业用途。
 
 ================================================================================
               Security Guard for Windows — 为您的 Windows 系统筑起坚实防线。
