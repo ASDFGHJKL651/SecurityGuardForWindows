@@ -151,7 +151,7 @@ std::unordered_set<std::wstring> g_trustedFolders;
 std::unordered_map<std::wstring, std::pair<int, std::chrono::steady_clock::time_point>> g_decisionCache;
 const int CACHE_EXPIRY_SECONDS = 120;
 
-// [NEW] 弹窗缓存：路径(小写) -> 最后弹窗时间（仅用于类型2和4）
+//弹窗缓存：路径(小写) -> 最后弹窗时间（仅用于类型2和4）
 std::unordered_map<std::wstring, std::chrono::steady_clock::time_point> g_alertCache;
 
 //  注册表弹窗缓存（类型3，30秒内不重复弹窗） 
@@ -163,6 +163,8 @@ std::unordered_set<std::wstring> g_trustedPaths;
 
 //动态基础目录（存放程序所在路径）
 std::wstring g_baseDir;
+
+std::unordered_set<std::string> g_networkAlertCache;
 
 HBRUSH g_hWhiteBrush = NULL;
 
@@ -284,7 +286,7 @@ HWND CreateAlertWindow(const MessageFromControlCenter& data);
 void LoadWhitelist();
 std::wstring ToLower(const std::wstring& str);
 void CleanExpiredCache();
-void CleanExpiredAlertCache();      // [NEW] 清理过期的弹窗缓存
+void CleanExpiredAlertCache();      //清理过期的弹窗缓存
 void ApplyDecision(int buttonId, const std::wstring& path, int pid);
 void AddToHighTrustWhiteList(const std::wstring& filePath);
 //  服务/任务操作辅助函数 
@@ -689,7 +691,7 @@ static HKEY GetRootKeyW(const std::wstring& rootStr) {
     return nullptr;
 }
 
- //修正 SetRegistryValue 函数
+ // SetRegistryValue 函数
 LONG SetRegistryValue(
     BYTE* lpFullPath,
     BYTE* lpType,
@@ -938,7 +940,7 @@ void CleanExpiredCache() {
     }
 }
 
-// [NEW] 清理过期的弹窗缓存（类型2和4）
+//清理过期的弹窗缓存（类型2和4）
 void CleanExpiredAlertCache() {
     auto now = std::chrono::steady_clock::now();
     for (auto it = g_alertCache.begin(); it != g_alertCache.end(); ) {
@@ -974,7 +976,7 @@ void ApplyDecision(int buttonId, const std::wstring& path, int pid) {
     switch (buttonId) {
         case IDC_BUTTON_TRUST:
         case IDC_BUTTON_UNTRUST:
-            // 无操作（窗口会被销毁，进程可能仍挂起？原始行为不恢复，保持）
+            // 无操作
             break;
         case IDC_BUTTON_QUARANTINE: {
             //使用动态路径
@@ -2072,7 +2074,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     return 0;  // 信任路径不再弹窗
                 }
             }
-            // [NEW] 针对类型2和4：先检查弹窗缓存，避免重复弹窗
+            //针对类型2：先检查弹窗缓存，避免重复弹窗
             if (pMsg->WindowType == 2) {
                 CleanExpiredAlertCache();  // 清理过期条目
                 auto alertIt = g_alertCache.find(lowerPath);
@@ -2115,30 +2117,53 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 // 注意：类型3不执行挂起和自动隔离，继续走正常流程（创建窗口）
             }
 
-            //  类型5：不挂起，不隔离 
-            if (pMsg->WindowType != 5) {
-                // 挂起进程（对于类型1和3，也挂起；对于类型2/4，如果未命中缓存，则挂起）
-                if(pMsg->WindowType == 1){
+
+            // 挂起进程（对于类型1）
+            if(pMsg->WindowType == 1){
                     int PID_ = pMsg->PID;
                     DWORD PID = static_cast<DWORD>(PID_);
                     SuspendProcess(PID);
-                }
-                // 自动隔离（score>=300）
-                if (int(pMsg->score) >= 300 && pMsg->WindowType==2) {
-                    //使用动态路径
-                    STARTUPINFO si;
-                    PROCESS_INFORMATION pi;
-
-                    ZeroMemory(&si, sizeof(si));
-                    si.cb = sizeof(si);
-                    ZeroMemory(&pi, sizeof(pi));
-                    // 注意：此处使用pData->path？但pData尚未创建，应使用pMsg->path
-                    std::wstring wcmd_isol = L"\"" + g_baseDir + L"\\isol.exe\"  add  \"" + g_baseDir + L"\\ISOL\"  \"" + (wchar_t*)(pMsg->path) + L"\"  @pASs7W#Ord";
-                    wchar_t* cmd_isol_ = new wchar_t[wcslen(wcmd_isol.c_str()) + 1];
-                    lstrcpyW(cmd_isol_, wcmd_isol.c_str());
-                    CreateProcess(NULL, cmd_isol_, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
-                }
             }
+            // 自动隔离（score>=300，WindowType==2）
+            if (int(pMsg->score) >= 300 && pMsg->WindowType==2) {
+                //使用动态路径
+                STARTUPINFO si;
+                PROCESS_INFORMATION pi;
+
+                ZeroMemory(&si, sizeof(si));
+                si.cb = sizeof(si);
+                ZeroMemory(&pi, sizeof(pi));
+                //使用pMsg->path
+                std::wstring wcmd_isol = L"\"" + g_baseDir + L"\\isol.exe\"  add  \"" + g_baseDir + L"\\ISOL\"  \"" + (wchar_t*)(pMsg->path) + L"\"  @pASs7W#Ord";
+                wchar_t* cmd_isol_ = new wchar_t[wcslen(wcmd_isol.c_str()) + 1];
+                lstrcpyW(cmd_isol_, wcmd_isol.c_str());
+                CreateProcess(NULL, cmd_isol_, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
+            }
+
+            if (pMsg->WindowType == 6) {
+                std::string ipLower = pMsg->ip;
+                std::transform(ipLower.begin(), ipLower.end(), ipLower.begin(), ::tolower);
+                std::string domainLower = pMsg->domain;
+                std::transform(domainLower.begin(), domainLower.end(), domainLower.begin(), ::tolower);
+
+                bool exists = false;
+                if (!ipLower.empty() && g_networkAlertCache.find(ipLower) != g_networkAlertCache.end()) {
+                    exists = true;
+                }
+                if (!domainLower.empty() && g_networkAlertCache.find(domainLower) != g_networkAlertCache.end()) {
+                    exists = true;
+                }
+
+                if (exists) {
+                    delete pMsg;
+                    return 0;
+                }
+
+                // 记录本次 IP 和域名（非空）
+                if (!ipLower.empty()) g_networkAlertCache.insert(ipLower);
+                if (!domainLower.empty()) g_networkAlertCache.insert(domainLower);
+            }
+            
 
             // 创建告警窗口
             HWND hwndAlert = CreateAlertWindow(*pMsg);
@@ -2304,7 +2329,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 SetRegistryValue(pData->key, pData->valuetype, pData->oldvalue, pData->oldvalue_len);
                 DestroyWindow(hwnd);
                 break;
-            //服务/任务按钮处理 
+            //  新增服务/任务按钮处理 
             case IDC_BUTTON_DISABLE: {
                 // 判断是服务还是任务，执行禁用
                 std::wstring name = pData->path;
@@ -2523,8 +2548,15 @@ HWND CreateAlertWindow(const MessageFromControlCenter& data) {
     const wchar_t CLASS_NAME[] = L"SampleClass";
     HINSTANCE hInst = GetModuleHandle(NULL);
     MessageFromControlCenter* pParam = new MessageFromControlCenter(data);
+
+    DWORD exStyle = 0;
+    if (data.WindowType != 0 && data.WindowType != 4) {
+        // 置顶、不激活（不影响其他窗口）、无任务栏图标
+        exStyle = WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW;
+    }
+
     HWND hwnd = CreateWindowEx(
-        0, CLASS_NAME, L"Security Guard Alert", WS_OVERLAPPEDWINDOW,
+        exStyle, CLASS_NAME, L"Security Guard Alert", WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT, CW_USEDEFAULT, BASE_WIDTH, BASE_HEIGHT,
         nullptr, nullptr, hInst, (LPVOID)pParam
     );
