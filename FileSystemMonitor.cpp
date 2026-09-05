@@ -6,7 +6,7 @@ FileSystemMonitor.cpp
 
 g++编译:
 cd %g++Path%
-g++.exe -fdiagnostics-color=always -g "%SourceCodePath%\FileSystemMonitor.cpp" -o "%ExecutablePath%\FileSystemMonitor.exe" -mconsole -municode -mwindows
+g++.exe -fdiagnostics-color=always -g "%SourceCodePath%\FileSystemMonitor.cpp" -o "%ExecutablePath%\FileSystemMonitor.exe" -lbcrypt -lshell32 -ladvapi32 -lshlwapi -lole32 -luser32 -mwindows
 
 运行权限：管理员权限
 */
@@ -35,6 +35,8 @@ g++.exe -fdiagnostics-color=always -g "%SourceCodePath%\FileSystemMonitor.cpp" -
 #include <winternl.h>
 #include "shutdown_handler.h"
 #include "nlohmann/json.hpp"
+#include "AES-256-CBCEncryptionCommon.h"
+#include "logrecord.h"
 
 #pragma comment(lib, "user32.lib")
 
@@ -198,23 +200,76 @@ bool LoadWhiteList() {
     if (pos != std::wstring::npos) {
         exeDir = exeDir.substr(0, pos + 1);
     }
-    std::wstring jsonPath = exeDir + L"WhiteList\\HighTrustWhiteList.json";
+    std::wstring jsonPathW = exeDir + L"WhiteList\\HighTrustWhiteList.json";
+
+    // 使用 Win32 API 打开加密文件
+    HANDLE hFile = CreateFileW(jsonPathW.c_str(), GENERIC_READ, FILE_SHARE_READ,
+                               NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        DWORD err = GetLastError();
+        char detail[256];
+        sprintf_s(detail, sizeof(detail), "Failed to open WhiteList file, error: %lu", err);
+        LogRecord::WriteLog(L".\\Logs\\LogFiles\\FileSystemMonitor.log", "[ERROR]", "[FileSystemMonitor]", detail);
+        return false;
+    }
+
+    // 获取文件大小
+    LARGE_INTEGER fileSize;
+    if (!GetFileSizeEx(hFile, &fileSize)) {
+        DWORD err = GetLastError();
+        char detail[256];
+        sprintf_s(detail, sizeof(detail), "GetFileSizeEx failed, error: %lu", err);
+        LogRecord::WriteLog(L".\\Logs\\LogFiles\\FileSystemMonitor.log", "[ERROR]", "[FileSystemMonitor]", detail);
+        CloseHandle(hFile);
+        return false;
+    }
+    if (fileSize.QuadPart == 0) {
+        LogRecord::WriteLog(L".\\Logs\\LogFiles\\FileSystemMonitor.log", "[ERROR]", "[FileSystemMonitor]", "WhiteList file is empty");
+        CloseHandle(hFile);
+        return false;
+    }
+
+    // 读取整个文件到内存
+    std::vector<BYTE> encryptedData(static_cast<size_t>(fileSize.QuadPart));
+    DWORD bytesRead = 0;
+    if (!ReadFile(hFile, encryptedData.data(), static_cast<DWORD>(encryptedData.size()), &bytesRead, NULL) ||
+        bytesRead != encryptedData.size()) {
+        DWORD err = GetLastError();
+        char detail[256];
+        sprintf_s(detail, sizeof(detail), "ReadFile failed, error: %lu", err);
+        LogRecord::WriteLog(L".\\Logs\\LogFiles\\FileSystemMonitor.log", "[ERROR]", "[FileSystemMonitor]", detail);
+        CloseHandle(hFile);
+        SecureZeroVector(encryptedData);
+        return false;
+    }
+    CloseHandle(hFile);
+
+    // 解密
+    std::string password = "9#Kp$LmQ@2wXz&Yv!5nR*TjH^3bC&Vg7";
+    std::vector<BYTE> key(password.begin(), password.end());
+    std::vector<BYTE> plaintext = AesDecrypt(encryptedData, key);
+    SecureZeroString(password);
+    SecureZeroVector(key);
+    SecureZeroVector(encryptedData);
+
+    if (plaintext.empty()) {
+        LogRecord::WriteLog(L".\\Logs\\LogFiles\\FileSystemMonitor.log", "[ERROR]", "[FileSystemMonitor]", "Decryption failed for WhiteList file");
+        return false;
+    }
+
+    std::string jsonStr(plaintext.begin(), plaintext.end());
+    SecureZeroVector(plaintext);
 
     try {
-        // 使用宽字符路径直接构造 ifstream（MSVC 支持此扩展）
-        std::ifstream ifs(jsonPath.c_str());
-        if (!ifs.is_open()) {
-            return false;
-        }
-        json j;
-        ifs >> j;
+        json j = json::parse(jsonStr);
+        SecureZeroString(jsonStr);
 
         std::vector<std::wstring> newFiles, newPaths;
         if (j.contains("Files") && j["Files"].is_array()) {
             for (const auto& item : j["Files"]) {
                 if (item.is_string()) {
                     std::string utf8 = item.get<std::string>();
-                    std::wstring path = Utf8ToWide(utf8);  // 正确解码
+                    std::wstring path = Utf8ToWide(utf8);
                     newFiles.push_back(NormalizePath(path));
                 }
             }
@@ -223,7 +278,7 @@ bool LoadWhiteList() {
             for (const auto& item : j["Paths"]) {
                 if (item.is_string()) {
                     std::string utf8 = item.get<std::string>();
-                    std::wstring path = Utf8ToWide(utf8);  // 正确解码
+                    std::wstring path = Utf8ToWide(utf8);
                     path = NormalizePath(path);
                     if (!path.empty() && path.back() != L'\\') {
                         path += L'\\';
@@ -238,10 +293,19 @@ bool LoadWhiteList() {
         whiteListFiles.swap(newFiles);
         whiteListPaths.swap(newPaths);
         return true;
+    } catch (const std::exception& e) {
+        char detail[512];
+        sprintf_s(detail, sizeof(detail), "JSON parse failed: %s", e.what());
+        LogRecord::WriteLog(L".\\Logs\\LogFiles\\FileSystemMonitor.log", "[ERROR]", "[FileSystemMonitor]", detail);
+        SecureZeroString(jsonStr);
+        return false;
     } catch (...) {
+        LogRecord::WriteLog(L".\\Logs\\LogFiles\\FileSystemMonitor.log", "[ERROR]", "[FileSystemMonitor]", "Unknown JSON parse error");
+        SecureZeroString(jsonStr);
         return false;
     }
 }
+
 //白名单自动重载线程
 void WhiteListReloadThread() {
     LoadWhiteList();   // 首次加载
@@ -673,6 +737,7 @@ int main() {
 
     if (monitorThreads.empty()) {
         wprintf(L"没有找到固定驱动器。\n");
+        SetProcessCritical(false);
         // 直接触发退出流程
         g_stop = true;
         g_cv.notify_all();

@@ -7,7 +7,7 @@ NetworkGuard.cpp
 
 g++编译:
 cd %g++Path%
-g++.exe -fdiagnostics-color=always -g "%SourceCodePath%\NetWorkGuard.cpp" -o "%ExecutablePath%\NetWorkGuard.exe" -lws2_32 -liphlpapi -lfwpuclnt -lpsapi -lole32 -lwintrust -lcrypt32 -std=c++11 -Wno-write-strings -mwindows
+g++.exe -fdiagnostics-color=always -g "%SourceCodePath%\NetworkGuard.cpp" -o "%ExecutablePath%\NetworkGuard.exe" -lws2_32 -liphlpapi -lfwpuclnt -lpsapi -lole32 -lwintrust -lcrypt32 -lbcrypt -lshell32 -ladvapi32 -lshlwapi -luser32  -mwindows -std=c++11 -Wno-write-strings
 
 运行权限：管理员权限
 */
@@ -47,6 +47,7 @@ g++.exe -fdiagnostics-color=always -g "%SourceCodePath%\NetWorkGuard.cpp" -o "%E
 #include <winternl.h>
 #include "shutdown_handler.h"
 #include "logrecord.h"
+#include "AES-256-CBCEncryptionCommon.h"
 
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "iphlpapi.lib")
@@ -98,7 +99,7 @@ bool ParseTLSClientHello(const unsigned char* data, int len, std::string& sni);
 bool VerifyDigitalSignature(const std::wstring& path);
 void ProcessPacket(const unsigned char* packet, int len); 
 
-// WFP GUID 定义（省略，保持与原来相同）
+// WFP GUID 定义
 GUID FWPM_LAYER_ALE_AUTH_CONNECT_V4 = 
     {0xc38d57d1, 0x05a7, 0x4c33, {0x90, 0x4f, 0x7f, 0xbc, 0xee, 0xe6, 0x0e, 0x82}};
 GUID FWPM_CONDITION_ALE_PROCESS_ID = 
@@ -316,29 +317,105 @@ bool RetryOperation(Func func, const char* name, int maxRetries = 10, int delayS
 
 //黑白名单加载与初始化
 bool LoadMaliciousList(const char* filename) {
-    FILE* f = fopen(filename, "r");
-    if (!f) return false;
-    char line[256];
+    // 构建完整路径（基于可执行文件目录）
+    wchar_t exePathW[MAX_PATH];
+    if (GetModuleFileNameW(NULL, exePathW, MAX_PATH) == 0) {
+        char detail[] = "GetModuleFileNameW failed";
+        LogRecord::WriteLog(L".\\Logs\\LogFiles\\NetworkGuard.log", "[ERROR]", "[NetworkGuard]", detail);
+        return false;
+    }
+    wchar_t* pLast = wcsrchr(exePathW, L'\\');
+    if (pLast) *(pLast + 1) = L'\0';
+    std::wstring baseDir = exePathW;
+
+    // 将传入的相对路径转为宽字符
+    int len = MultiByteToWideChar(CP_ACP, 0, filename, -1, NULL, 0);
+    if (len == 0) return false;
+    std::wstring wfilename(len, L'\0');
+    MultiByteToWideChar(CP_ACP, 0, filename, -1, &wfilename[0], len);
+    wfilename.pop_back(); // 移除末尾空字符
+    std::wstring fullPathW = baseDir + wfilename;
+
+    // 打开加密文件
+    HANDLE hFile = CreateFileW(fullPathW.c_str(), GENERIC_READ, FILE_SHARE_READ,
+                               NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        DWORD err = GetLastError();
+        char detail[256];
+        sprintf_s(detail, sizeof(detail), "Failed to open %s, error: %lu", filename, err);
+        LogRecord::WriteLog(L".\\Logs\\LogFiles\\NetworkGuard.log", "[WARNING]", "[NetworkGuard]", detail);
+        return false;
+    }
+
+    LARGE_INTEGER fileSize;
+    if (!GetFileSizeEx(hFile, &fileSize) || fileSize.QuadPart == 0) {
+        if (fileSize.QuadPart == 0) {
+            char detail[256];
+            sprintf_s(detail, sizeof(detail), "%s is empty", filename);
+            LogRecord::WriteLog(L".\\Logs\\LogFiles\\NetworkGuard.log", "[WARNING]", "[NetworkGuard]", detail);
+        } else {
+            DWORD err = GetLastError();
+            char detail[256];
+            sprintf_s(detail, sizeof(detail), "GetFileSizeEx failed for %s, error: %lu", filename, err);
+            LogRecord::WriteLog(L".\\Logs\\LogFiles\\NetworkGuard.log", "[ERROR]", "[NetworkGuard]", detail);
+        }
+        CloseHandle(hFile);
+        return false;
+    }
+
+    std::vector<BYTE> encryptedData(static_cast<size_t>(fileSize.QuadPart));
+    DWORD bytesRead = 0;
+    if (!ReadFile(hFile, encryptedData.data(), static_cast<DWORD>(encryptedData.size()), &bytesRead, NULL) ||
+        bytesRead != encryptedData.size()) {
+        DWORD err = GetLastError();
+        char detail[256];
+        sprintf_s(detail, sizeof(detail), "ReadFile failed for %s, error: %lu", filename, err);
+        LogRecord::WriteLog(L".\\Logs\\LogFiles\\NetworkGuard.log", "[ERROR]", "[NetworkGuard]", detail);
+        CloseHandle(hFile);
+        SecureZeroVector(encryptedData);
+        return false;
+    }
+    CloseHandle(hFile);
+
+    // 解密
+    std::string password = "9#Kp$LmQ@2wXz&Yv!5nR*TjH^3bC&Vg7";
+    std::vector<BYTE> key(password.begin(), password.end());
+    std::vector<BYTE> plaintext = AesDecrypt(encryptedData, key);
+    SecureZeroString(password);
+    SecureZeroVector(key);
+    SecureZeroVector(encryptedData);
+
+    if (plaintext.empty()) {
+        char detail[256];
+        sprintf_s(detail, sizeof(detail), "Decryption failed for %s", filename);
+        LogRecord::WriteLog(L".\\Logs\\LogFiles\\NetworkGuard.log", "[ERROR]", "[NetworkGuard]", detail);
+        return false;
+    }
+
+    std::string content(plaintext.begin(), plaintext.end());
+    SecureZeroVector(plaintext);
+
+    std::istringstream iss(content);
+    std::string line;
     int ipCount = 0, domainCount = 0;
-    while (fgets(line, sizeof(line), f)) {
-        size_t len = strlen(line);
-        if (len > 0 && line[len-1] == '\n') line[--len] = '\0';
-        if (len > 0 && line[len-1] == '\r') line[--len] = '\0';
+    while (std::getline(iss, line)) {
+        size_t len = line.length();
+        if (len > 0 && line[len-1] == '\r') line.resize(--len);
         if (len == 0) continue;
+
         bool isIP = true;
-        for (char* p = line; *p; ++p) {
+        for (char* p = &line[0]; *p; ++p) {
             if (!(*p >= '0' && *p <= '9') && *p != '.' && *p != '/') {
                 isIP = false;
                 break;
             }
         }
         if (isIP) {
-            // 检查是否为CIDR
-            char* slash = strchr(line, '/');
+            char* slash = strchr(&line[0], '/');
             if (slash) {
                 *slash = '\0';
                 in_addr addr;
-                if (inet_pton(AF_INET, line, &addr) == 1) {
+                if (inet_pton(AF_INET, line.c_str(), &addr) == 1) {
                     int mask = atoi(slash+1);
                     if (mask >= 0 && mask <= 32) {
                         CIDRBlock cidr;
@@ -349,10 +426,8 @@ bool LoadMaliciousList(const char* filename) {
                     }
                 }
             } else {
-                // 精确IP（暂时不加入CIDR，用哈希集合更快）
-                // 为了兼容，保留精确IP在CIDR中也能处理，但使用CIDR匹配时把掩码设为32
                 in_addr addr;
-                if (inet_pton(AF_INET, line, &addr) == 1) {
+                if (inet_pton(AF_INET, line.c_str(), &addr) == 1) {
                     CIDRBlock cidr;
                     cidr.prefix = addr;
                     cidr.mask = 32;
@@ -361,13 +436,11 @@ bool LoadMaliciousList(const char* filename) {
                 }
             }
         } else {
-            // 域名
-            std::string domain(line);
-            // 通配符
+            std::string domain = line;
             if (domain.size() > 2 && domain[0] == '*' && domain[1] == '.') {
                 std::string suffix = domain.substr(2);
                 std::reverse(suffix.begin(), suffix.end());
-                suffix += ".";  // 反转后以"."结尾方便查找前缀
+                suffix += ".";
                 g_blacklistWildcardDomainsReversed.insert(suffix);
             } else {
                 g_blacklistExactDomains.insert(domain);
@@ -375,21 +448,92 @@ bool LoadMaliciousList(const char* filename) {
             domainCount++;
         }
     }
-    fclose(f);
-    printf("[DEBUG] Loaded %d IPs/CIDR and %d domains from %s\n", ipCount, domainCount, filename);
+    SecureZeroString(content);
+    printf("[DEBUG] Loaded %d IPs/CIDR and %d domains from %s (encrypted)\n", ipCount, domainCount, filename);
     return true;
 }
 
 bool LoadWhitelist(const char* filename) {
-    FILE* f = fopen(filename, "r");
-    if (!f) return false;
-    char line[256];
-    while (fgets(line, sizeof(line), f)) {
-        size_t len = strlen(line);
-        if (len > 0 && line[len-1] == '\n') line[--len] = '\0';
-        if (len > 0 && line[len-1] == '\r') line[--len] = '\0';
+    wchar_t exePathW[MAX_PATH];
+    if (GetModuleFileNameW(NULL, exePathW, MAX_PATH) == 0) {
+        LogRecord::WriteLog(L".\\Logs\\LogFiles\\NetworkGuard.log", "[ERROR]", "[NetworkGuard]", "GetModuleFileNameW failed");
+        return false;
+    }
+    wchar_t* pLast = wcsrchr(exePathW, L'\\');
+    if (pLast) *(pLast + 1) = L'\0';
+    std::wstring baseDir = exePathW;
+
+    int len = MultiByteToWideChar(CP_ACP, 0, filename, -1, NULL, 0);
+    if (len == 0) return false;
+    std::wstring wfilename(len, L'\0');
+    MultiByteToWideChar(CP_ACP, 0, filename, -1, &wfilename[0], len);
+    wfilename.pop_back();
+    std::wstring fullPathW = baseDir + wfilename;
+
+    HANDLE hFile = CreateFileW(fullPathW.c_str(), GENERIC_READ, FILE_SHARE_READ,
+                               NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        DWORD err = GetLastError();
+        char detail[256];
+        sprintf_s(detail, sizeof(detail), "Failed to open %s, error: %lu", filename, err);
+        LogRecord::WriteLog(L".\\Logs\\LogFiles\\NetworkGuard.log", "[WARNING]", "[NetworkGuard]", detail);
+        return false;
+    }
+
+    LARGE_INTEGER fileSize;
+    if (!GetFileSizeEx(hFile, &fileSize) || fileSize.QuadPart == 0) {
+        if (fileSize.QuadPart == 0) {
+            char detail[256];
+            sprintf_s(detail, sizeof(detail), "%s is empty", filename);
+            LogRecord::WriteLog(L".\\Logs\\LogFiles\\NetworkGuard.log", "[WARNING]", "[NetworkGuard]", detail);
+        } else {
+            DWORD err = GetLastError();
+            char detail[256];
+            sprintf_s(detail, sizeof(detail), "GetFileSizeEx failed for %s, error: %lu", filename, err);
+            LogRecord::WriteLog(L".\\Logs\\LogFiles\\NetworkGuard.log", "[ERROR]", "[NetworkGuard]", detail);
+        }
+        CloseHandle(hFile);
+        return false;
+    }
+
+    std::vector<BYTE> encryptedData(static_cast<size_t>(fileSize.QuadPart));
+    DWORD bytesRead = 0;
+    if (!ReadFile(hFile, encryptedData.data(), static_cast<DWORD>(encryptedData.size()), &bytesRead, NULL) ||
+        bytesRead != encryptedData.size()) {
+        DWORD err = GetLastError();
+        char detail[256];
+        sprintf_s(detail, sizeof(detail), "ReadFile failed for %s, error: %lu", filename, err);
+        LogRecord::WriteLog(L".\\Logs\\LogFiles\\NetworkGuard.log", "[ERROR]", "[NetworkGuard]", detail);
+        CloseHandle(hFile);
+        SecureZeroVector(encryptedData);
+        return false;
+    }
+    CloseHandle(hFile);
+
+    std::string password = "9#Kp$LmQ@2wXz&Yv!5nR*TjH^3bC&Vg7";
+    std::vector<BYTE> key(password.begin(), password.end());
+    std::vector<BYTE> plaintext = AesDecrypt(encryptedData, key);
+    SecureZeroString(password);
+    SecureZeroVector(key);
+    SecureZeroVector(encryptedData);
+
+    if (plaintext.empty()) {
+        char detail[256];
+        sprintf_s(detail, sizeof(detail), "Decryption failed for %s", filename);
+        LogRecord::WriteLog(L".\\Logs\\LogFiles\\NetworkGuard.log", "[ERROR]", "[NetworkGuard]", detail);
+        return false;
+    }
+
+    std::string content(plaintext.begin(), plaintext.end());
+    SecureZeroVector(plaintext);
+
+    std::istringstream iss(content);
+    std::string line;
+    while (std::getline(iss, line)) {
+        size_t len = line.length();
+        if (len > 0 && line[len-1] == '\r') line.resize(--len);
         if (len == 0) continue;
-        std::string domain(line);
+        std::string domain = line;
         if (domain.size() > 2 && domain[0] == '*' && domain[1] == '.') {
             std::string suffix = domain.substr(2);
             std::reverse(suffix.begin(), suffix.end());
@@ -399,24 +543,96 @@ bool LoadWhitelist(const char* filename) {
             g_whitelistExactDomains.insert(domain);
         }
     }
-    fclose(f);
-    printf("[DEBUG] Loaded whitelist from %s\n", filename);
+    SecureZeroString(content);
+    printf("[DEBUG] Loaded whitelist from %s (encrypted)\n", filename);
     return true;
 }
 
 bool LoadMaliciousTLSFingerprints(const char* filename) {
-    FILE* f = fopen(filename, "r");
-    if (!f) return false;
-    char line[64];
-    while (fgets(line, sizeof(line), f)) {
-        size_t len = strlen(line);
-        if (len > 0 && line[len-1] == '\n') line[--len] = '\0';
-        if (len > 0 && line[len-1] == '\r') line[--len] = '\0';
-        if (len == 0) continue;
-        g_maliciousTLSFingerprints.insert(std::string(line));
+    wchar_t exePathW[MAX_PATH];
+    if (GetModuleFileNameW(NULL, exePathW, MAX_PATH) == 0) {
+        LogRecord::WriteLog(L".\\Logs\\LogFiles\\NetworkGuard.log", "[ERROR]", "[NetworkGuard]", "GetModuleFileNameW failed");
+        return false;
     }
-    fclose(f);
-    printf("[DEBUG] Loaded %zu TLS fingerprints from %s\n", g_maliciousTLSFingerprints.size(), filename);
+    wchar_t* pLast = wcsrchr(exePathW, L'\\');
+    if (pLast) *(pLast + 1) = L'\0';
+    std::wstring baseDir = exePathW;
+
+    int len = MultiByteToWideChar(CP_ACP, 0, filename, -1, NULL, 0);
+    if (len == 0) return false;
+    std::wstring wfilename(len, L'\0');
+    MultiByteToWideChar(CP_ACP, 0, filename, -1, &wfilename[0], len);
+    wfilename.pop_back();
+    std::wstring fullPathW = baseDir + wfilename;
+
+    HANDLE hFile = CreateFileW(fullPathW.c_str(), GENERIC_READ, FILE_SHARE_READ,
+                               NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        DWORD err = GetLastError();
+        char detail[256];
+        sprintf_s(detail, sizeof(detail), "Failed to open %s, error: %lu", filename, err);
+        LogRecord::WriteLog(L".\\Logs\\LogFiles\\NetworkGuard.log", "[WARNING]", "[NetworkGuard]", detail);
+        return false;
+    }
+
+    LARGE_INTEGER fileSize;
+    if (!GetFileSizeEx(hFile, &fileSize) || fileSize.QuadPart == 0) {
+        if (fileSize.QuadPart == 0) {
+            char detail[256];
+            sprintf_s(detail, sizeof(detail), "%s is empty", filename);
+            LogRecord::WriteLog(L".\\Logs\\LogFiles\\NetworkGuard.log", "[WARNING]", "[NetworkGuard]", detail);
+        } else {
+            DWORD err = GetLastError();
+            char detail[256];
+            sprintf_s(detail, sizeof(detail), "GetFileSizeEx failed for %s, error: %lu", filename, err);
+            LogRecord::WriteLog(L".\\Logs\\LogFiles\\NetworkGuard.log", "[ERROR]", "[NetworkGuard]", detail);
+        }
+        CloseHandle(hFile);
+        return false;
+    }
+
+    std::vector<BYTE> encryptedData(static_cast<size_t>(fileSize.QuadPart));
+    DWORD bytesRead = 0;
+    if (!ReadFile(hFile, encryptedData.data(), static_cast<DWORD>(encryptedData.size()), &bytesRead, NULL) ||
+        bytesRead != encryptedData.size()) {
+        DWORD err = GetLastError();
+        char detail[256];
+        sprintf_s(detail, sizeof(detail), "ReadFile failed for %s, error: %lu", filename, err);
+        LogRecord::WriteLog(L".\\Logs\\LogFiles\\NetworkGuard.log", "[ERROR]", "[NetworkGuard]", detail);
+        CloseHandle(hFile);
+        SecureZeroVector(encryptedData);
+        return false;
+    }
+    CloseHandle(hFile);
+
+    std::string password = "9#Kp$LmQ@2wXz&Yv!5nR*TjH^3bC&Vg7";
+    std::vector<BYTE> key(password.begin(), password.end());
+    std::vector<BYTE> plaintext = AesDecrypt(encryptedData, key);
+    SecureZeroString(password);
+    SecureZeroVector(key);
+    SecureZeroVector(encryptedData);
+
+    if (plaintext.empty()) {
+        char detail[256];
+        sprintf_s(detail, sizeof(detail), "Decryption failed for %s", filename);
+        LogRecord::WriteLog(L".\\Logs\\LogFiles\\NetworkGuard.log", "[ERROR]", "[NetworkGuard]", detail);
+        return false;
+    }
+
+    std::string content(plaintext.begin(), plaintext.end());
+    SecureZeroVector(plaintext);
+
+    std::istringstream iss(content);
+    std::string line;
+    while (std::getline(iss, line)) {
+        size_t len = line.length();
+        if (len > 0 && line[len-1] == '\r') line.resize(--len);
+        if (len == 0) continue;
+        g_maliciousTLSFingerprints.insert(line);
+    }
+    SecureZeroString(content);
+    printf("[DEBUG] Loaded %zu TLS fingerprints from %s (encrypted)\n",
+           g_maliciousTLSFingerprints.size(), filename);
     return true;
 }
 
@@ -528,7 +744,7 @@ double VowelConsonantRatio(const char* domain) {
 bool ContainsEnglishWord(const char* domain) {
     std::string d(domain);
     std::transform(d.begin(), d.end(), d.begin(), ::tolower);
-    // 简单检查是否包含常见单词（至少3个字母）
+    // 检查是否包含常见单词（至少3个字母）
     for (const auto& word : commonEnglishWords) {
         if (word.size() >= 3 && d.find(word) != std::string::npos) {
             return true;

@@ -6,7 +6,7 @@ MemoryGuard.cpp
 
 g++编译:
 cd %g++Path%
-g++.exe -fdiagnostics-color=always -g "%SourceCodePath%\MemoryGuard.cpp" -o "%ExecutablePath%\MemoryGuard.exe" -lpsapi -lntdll -luser32 -lwintrust -lcrypt32 -liphlpapi -lws2_32 -static -std=c++11 -lpthread -ltdh -mwindows
+g++.exe -fdiagnostics-color=always -g "%SourceCodePath%\MemoryGuard.cpp" -o "%ExecutablePath%\MemoryGuard.exe" -lpsapi -lntdll -luser32 -lwintrust -lcrypt32 -liphlpapi -lws2_32 -static -std=c++11 -lpthread -ltdh -lbcrypt -lshell32 -ladvapi32 -lshlwapi -lole32 -mwindows
 
 运行权限：管理员权限
 */
@@ -53,6 +53,7 @@ g++.exe -fdiagnostics-color=always -g "%SourceCodePath%\MemoryGuard.cpp" -o "%Ex
 #include "nlohmann/json.hpp"
 #include "shutdown_handler.h"
 #include "logrecord.h"
+#include "AES-256-CBCEncryptionCommon.h"
 
 using json = nlohmann::json;
 
@@ -148,8 +149,8 @@ private:
 
 //全局缓存定义
 static LRUCache<std::wstring, uint32_t> g_ModuleHashCache(5000); // (模块路径, .text哈希)
-static LRUCache<DWORD, std::map<std::wstring, uint32_t>> g_PidModuleHashCache(3000); // 每个进程的模块哈希缓存，实际每个进程内使用map，但这里只存整体？
-// 实现为：每个进程独立LRU缓存，但总条目受控。
+static LRUCache<DWORD, std::map<std::wstring, uint32_t>> g_PidModuleHashCache(3000); // 每个进程的模块哈希缓存
+// 每个进程独立LRU缓存，但总条目受控。
 static std::map<DWORD, LRUCache<std::wstring, uint32_t>> g_PidModuleHashCacheMap;
 static std::mutex g_HashCacheMutex;
 static std::unordered_map<DWORD, ULONGLONG> g_LastEventTime;
@@ -624,65 +625,80 @@ static double GetSystemCPUUsage();
 bool withUi;
 
 static void LoadWhiteList() {
-    // 1. 构造 WhiteList 文件路径（可执行文件同级目录下的 WhiteList\HighTrustWhiteList.json）
-    wchar_t exePath[MAX_PATH];
-    if (GetModuleFileNameW(NULL, exePath, MAX_PATH) == 0) {
-        wprintf(L"[ERROR] GetModuleFileNameW failed\n");
+    // 获取可执行文件目录（宽字符）
+    wchar_t exePathW[MAX_PATH];
+    if (GetModuleFileNameW(NULL, exePathW, MAX_PATH) == 0) {
+        LogRecord::WriteLog(L".\\Logs\\LogFiles\\MemoryGuard.log", "[ERROR]", "[MemoryGuard]", "GetModuleFileNameW failed");
         return;
     }
-    wchar_t* pLast = wcsrchr(exePath, L'\\');
+    wchar_t* pLast = wcsrchr(exePathW, L'\\');
     if (pLast) *(pLast + 1) = L'\0';
-    std::wstring baseDir = exePath;
-    std::wstring jsonPath = baseDir + L"WhiteList\\HighTrustWhiteList.json";
+    std::wstring baseDir = exePathW;
+    std::wstring jsonPathW = baseDir + L"WhiteList\\HighTrustWhiteList.json";
 
-    // 2. 使用 Win32 API 打开文件
-    HANDLE hFile = CreateFileW(
-        jsonPath.c_str(),
-        GENERIC_READ,
-        FILE_SHARE_READ,
-        NULL,
-        OPEN_EXISTING,
-        FILE_ATTRIBUTE_NORMAL,
-        NULL
-    );
+    // 使用 Win32 API 打开加密文件
+    HANDLE hFile = CreateFileW(jsonPathW.c_str(), GENERIC_READ, FILE_SHARE_READ,
+                               NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (hFile == INVALID_HANDLE_VALUE) {
-        wprintf(L"[WARN] WhiteList file not found: %ls (error %lu)\n",
-                jsonPath.c_str(), GetLastError());
+        DWORD err = GetLastError();
+        char detail[256];
+        sprintf_s(detail, sizeof(detail), "Failed to open WhiteList file, error: %lu", err);
+        LogRecord::WriteLog(L".\\Logs\\LogFiles\\MemoryGuard.log", "[WARN]", "[MemoryGuard]", detail);
         return;
     }
 
-    // 3. 获取文件大小
     LARGE_INTEGER fileSize;
     if (!GetFileSizeEx(hFile, &fileSize)) {
-        wprintf(L"[ERROR] GetFileSizeEx failed\n");
+        DWORD err = GetLastError();
+        char detail[256];
+        sprintf_s(detail, sizeof(detail), "GetFileSizeEx failed, error: %lu", err);
+        LogRecord::WriteLog(L".\\Logs\\LogFiles\\MemoryGuard.log", "[ERROR]", "[MemoryGuard]", detail);
         CloseHandle(hFile);
         return;
     }
     if (fileSize.QuadPart == 0) {
+        LogRecord::WriteLog(L".\\Logs\\LogFiles\\MemoryGuard.log", "[WARN]", "[MemoryGuard]", "WhiteList file is empty");
         CloseHandle(hFile);
         return;
     }
 
-    // 4. 分配缓冲区并读取整个文件
-    std::string fileContent;
-    fileContent.resize(static_cast<size_t>(fileSize.QuadPart));
+    std::vector<BYTE> encryptedData(static_cast<size_t>(fileSize.QuadPart));
     DWORD bytesRead = 0;
-    if (!ReadFile(hFile, &fileContent[0], static_cast<DWORD>(fileSize.QuadPart), &bytesRead, NULL) ||
-        bytesRead != fileSize.QuadPart) {
-        wprintf(L"[ERROR] ReadFile failed or incomplete\n");
+    if (!ReadFile(hFile, encryptedData.data(), static_cast<DWORD>(encryptedData.size()), &bytesRead, NULL) ||
+        bytesRead != encryptedData.size()) {
+        DWORD err = GetLastError();
+        char detail[256];
+        sprintf_s(detail, sizeof(detail), "ReadFile failed, error: %lu", err);
+        LogRecord::WriteLog(L".\\Logs\\LogFiles\\MemoryGuard.log", "[ERROR]", "[MemoryGuard]", detail);
         CloseHandle(hFile);
+        SecureZeroVector(encryptedData);
         return;
     }
     CloseHandle(hFile);
 
-    // 5. 解析 JSON
+    // 解密
+    std::string password = "9#Kp$LmQ@2wXz&Yv!5nR*TjH^3bC&Vg7";
+    std::vector<BYTE> key(password.begin(), password.end());
+    std::vector<BYTE> plaintext = AesDecrypt(encryptedData, key);
+    SecureZeroString(password);
+    SecureZeroVector(key);
+    SecureZeroVector(encryptedData);
+
+    if (plaintext.empty()) {
+        LogRecord::WriteLog(L".\\Logs\\LogFiles\\MemoryGuard.log", "[ERROR]", "[MemoryGuard]", "Decryption failed for WhiteList file");
+        return;
+    }
+
+    std::string fileContent(plaintext.begin(), plaintext.end());
+    SecureZeroVector(plaintext);
+
     try {
         json j = json::parse(fileContent);
+        SecureZeroString(fileContent);
 
         std::set<std::wstring> newFiles;
         std::vector<std::wstring> newPaths;
 
-        // 解析 Files 数组（UTF-8 字符串转 wstring）
         if (j.contains("Files") && j["Files"].is_array()) {
             for (auto& item : j["Files"]) {
                 std::string utf8 = item.get<std::string>();
@@ -691,14 +707,12 @@ static void LoadWhiteList() {
                     std::wstring wstr(len, L'\0');
                     MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, &wstr[0], len);
                     if (!wstr.empty() && wstr.back() == L'\0') wstr.pop_back();
-                    // 转为小写并存入
                     std::transform(wstr.begin(), wstr.end(), wstr.begin(), ::towlower);
                     newFiles.insert(wstr);
                 }
             }
         }
 
-        // 解析 Paths 数组
         if (j.contains("Paths") && j["Paths"].is_array()) {
             for (auto& item : j["Paths"]) {
                 std::string utf8 = item.get<std::string>();
@@ -708,7 +722,6 @@ static void LoadWhiteList() {
                     MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, &wstr[0], len);
                     if (!wstr.empty() && wstr.back() == L'\0') wstr.pop_back();
                     std::transform(wstr.begin(), wstr.end(), wstr.begin(), ::towlower);
-                    // 确保目录以反斜杠结尾
                     if (!wstr.empty() && wstr.back() != L'\\')
                         wstr.push_back(L'\\');
                     newPaths.push_back(wstr);
@@ -716,7 +729,6 @@ static void LoadWhiteList() {
             }
         }
 
-        // 原子更新全局白名单
         {
             std::lock_guard<std::mutex> lock(g_WhiteListMutex);
             g_WhiteListFiles.swap(newFiles);
@@ -726,7 +738,13 @@ static void LoadWhiteList() {
                 g_WhiteListFiles.size(), g_WhiteListPaths.size());
 
     } catch (const std::exception& e) {
-        wprintf(L"[ERROR] Failed to parse white list JSON: %hs\n", e.what());
+        char detail[512];
+        sprintf_s(detail, sizeof(detail), "JSON parse failed: %s", e.what());
+        LogRecord::WriteLog(L".\\Logs\\LogFiles\\MemoryGuard.log", "[ERROR]", "[MemoryGuard]", detail);
+        SecureZeroString(fileContent);
+    } catch (...) {
+        LogRecord::WriteLog(L".\\Logs\\LogFiles\\MemoryGuard.log", "[ERROR]", "[MemoryGuard]", "Unknown JSON parse error");
+        SecureZeroString(fileContent);
     }
 }
 
@@ -4417,7 +4435,7 @@ static void NetworkMonitorThread() {
         }
         free(pTcpTable);
 
-        // UDP (DNS) 简单
+        // UDP (DNS)
         MIB_UDPTABLE_OWNER_PID* pUdpTable = NULL;
         dwSize = 0;
         if (GetExtendedUdpTable(NULL, &dwSize, FALSE, AF_INET, UDP_TABLE_OWNER_PID, 0) == ERROR_INSUFFICIENT_BUFFER) {
@@ -4569,7 +4587,7 @@ static double GetSystemCPUUsage() {
 //主动扫描线程 
 static void ActiveScanThread() {
     while (!g_StopRequested) {
-        WaitForSingleObject(g_hExitEvent,90000);
+        WaitForSingleObject(g_hExitEvent,180000);
         if (g_StopRequested) break;
 
         // 检查系统CPU
@@ -4770,51 +4788,93 @@ static void AttackChainDetector(ScanResult& result, DWORD pid) {
 
 // 恶意IP加载与检查
 static void LoadMaliciousIPs() {
-    // 获取程序自身所在目录（ANSI 路径）
-    char exePathA[MAX_PATH];
-    if (GetModuleFileNameA(NULL, exePathA, MAX_PATH) == 0) {
-        // 失败则使用默认
-        std::lock_guard<std::mutex> lock(g_MaliciousIPsMutex);
-        g_MaliciousIPs.insert("5.5.5.5");
-        g_MaliciousIPs.insert("6.6.6.6");
-        wprintf(L"[WARN] Cannot get module path, using default IPs.\n");
-        return;
-    }
+    bool loaded = false;
 
-    // 截断到目录（去掉文件名，保留尾部反斜杠）
-    char* pLastSlash = strrchr(exePathA, '\\');
-    if (pLastSlash) {
-        *(pLastSlash + 1) = '\0';          // 保留目录
+    // 获取可执行文件目录（宽字符）
+    wchar_t exePathW[MAX_PATH];
+    if (GetModuleFileNameW(NULL, exePathW, MAX_PATH) == 0) {
+        LogRecord::WriteLog(L".\\Logs\\LogFiles\\MemoryGuard.log", "[ERROR]", "[MemoryGuard]", "GetModuleFileNameW failed");
     } else {
-        // 无路径（理论上不会发生）
-        exePathA[0] = '\0';
-    }
+        wchar_t* pLast = wcsrchr(exePathW, L'\\');
+        if (pLast) *(pLast + 1) = L'\0';
+        std::wstring baseDir = exePathW;
+        std::wstring filePathW = baseDir + L"WhiteList\\malicious.txt";
 
-    // 拼接 "malicious.txt"
-    strcat_s(exePathA, MAX_PATH, "WhiteList\\malicious.txt");
+        // 打开加密文件
+        HANDLE hFile = CreateFileW(filePathW.c_str(), GENERIC_READ, FILE_SHARE_READ,
+                                   NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (hFile != INVALID_HANDLE_VALUE) {
+            LARGE_INTEGER fileSize;
+            if (GetFileSizeEx(hFile, &fileSize) && fileSize.QuadPart > 0) {
+                std::vector<BYTE> encryptedData(static_cast<size_t>(fileSize.QuadPart));
+                DWORD bytesRead = 0;
+                if (ReadFile(hFile, encryptedData.data(), static_cast<DWORD>(encryptedData.size()), &bytesRead, NULL) &&
+                    bytesRead == encryptedData.size()) {
+                    // 解密
+                    std::string password = "9#Kp$LmQ@2wXz&Yv!5nR*TjH^3bC&Vg7";
+                    std::vector<BYTE> key(password.begin(), password.end());
+                    std::vector<BYTE> plaintext = AesDecrypt(encryptedData, key);
+                    SecureZeroString(password);
+                    SecureZeroVector(key);
+                    SecureZeroVector(encryptedData);
 
-    // 尝试打开文件
-    std::ifstream file(exePathA);
-    if (file.is_open()) {
-        std::string line;
-        while (std::getline(file, line)) {
-            // 忽略空行和注释行（以 # 开头）
-            if (!line.empty() && line[0] != '#') {
-                // 去除末尾可能存在的回车符
-                if (!line.empty() && line.back() == '\r')
-                    line.pop_back();
-                std::lock_guard<std::mutex> lock(g_MaliciousIPsMutex);
-                g_MaliciousIPs.insert(line);
+                    if (!plaintext.empty()) {
+                        std::string content(plaintext.begin(), plaintext.end());
+                        SecureZeroVector(plaintext);
+
+                        {
+                            std::set<std::string> newIPs;
+                            std::istringstream iss(content);
+                            std::string line;
+                            while (std::getline(iss, line)) {
+                                if (!line.empty() && line[0] != '#') {
+                                    if (!line.empty() && line.back() == '\r')
+                                        line.pop_back();
+                                    newIPs.insert(line);
+                                }
+                            }
+                            SecureZeroString(content);
+
+                            std::lock_guard<std::mutex> lock(g_MaliciousIPsMutex);
+                            g_MaliciousIPs.swap(newIPs);
+                            loaded = true;
+                            wprintf(L"[+] Loaded %zu malicious IPs from encrypted file.\n", g_MaliciousIPs.size());
+                        }
+                    } else {
+                        LogRecord::WriteLog(L".\\Logs\\LogFiles\\MemoryGuard.log", "[ERROR]", "[MemoryGuard]", "Decryption failed for malicious IP file");
+                    }
+                } else {
+                    DWORD err = GetLastError();
+                    char detail[256];
+                    sprintf_s(detail, sizeof(detail), "ReadFile failed, error: %lu", err);
+                    LogRecord::WriteLog(L".\\Logs\\LogFiles\\MemoryGuard.log", "[ERROR]", "[MemoryGuard]", detail);
+                    SecureZeroVector(encryptedData);
+                }
+            } else {
+                if (fileSize.QuadPart == 0) {
+                    LogRecord::WriteLog(L".\\Logs\\LogFiles\\MemoryGuard.log", "[WARN]", "[MemoryGuard]", "Malicious IP file is empty");
+                } else {
+                    DWORD err = GetLastError();
+                    char detail[256];
+                    sprintf_s(detail, sizeof(detail), "GetFileSizeEx failed, error: %lu", err);
+                    LogRecord::WriteLog(L".\\Logs\\LogFiles\\MemoryGuard.log", "[ERROR]", "[MemoryGuard]", detail);
+                }
             }
+            CloseHandle(hFile);
+        } else {
+            DWORD err = GetLastError();
+            char detail[256];
+            sprintf_s(detail, sizeof(detail), "Failed to open malicious IP file, error: %lu", err);
+            LogRecord::WriteLog(L".\\Logs\\LogFiles\\MemoryGuard.log", "[WARN]", "[MemoryGuard]", detail);
         }
-        file.close();
-        wprintf(L"[+] Loaded %zu malicious IPs from %hs.\n", g_MaliciousIPs.size(), exePathA);
-    } else {
-        // 文件不存在或无法读取，使用默认测试 IP
+    }
+
+    // 若加载失败，使用默认值
+    if (!loaded) {
         std::lock_guard<std::mutex> lock(g_MaliciousIPsMutex);
         g_MaliciousIPs.insert("5.5.5.5");
         g_MaliciousIPs.insert("6.6.6.6");
-        wprintf(L"[WARN] Malicious IP file '%hs' not found, using defaults.\n", exePathA);
+        wprintf(L"[WARN] Using default malicious IPs.\n");
     }
 }
 
@@ -5607,7 +5667,7 @@ VOID WINAPI EventRecordCallback(PEVENT_RECORD pEventRecord) {
         auto it = g_LastEventTime.find(pid);
         if (it != g_LastEventTime.end()) {
             // 1秒 = 10,000,000 个 100ns 单位
-            if (eventTime - it->second < 10000000ULL) {
+            if (eventTime - it->second < 30000000ULL) {
                 // 重复事件，直接丢弃（不进行任何后续处理）
                 return;
             }

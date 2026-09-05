@@ -377,7 +377,7 @@ std::string ExtractFilePath(const std::string& text, const std::vector<std::stri
 
     // 对每个 token，检查是否包含扩展名
     for (const auto& token : tokens) {
-        // 去除可能的尾随引号（如果 token 内有引号，说明之前没有正确处理，这里简单清理）
+        // 去除可能的尾随引号
         std::string cleanToken = token;
         if (cleanToken.front() == '"') cleanToken.erase(0, 1);
         if (cleanToken.back() == '"') cleanToken.pop_back();
@@ -418,7 +418,7 @@ bool ContainsCommandLine(const std::string& text) {
             lower.find("wscript") != std::string::npos);
 }
 
-// 提取整个命令行内容（此处简单返回原字符串，可根据需要裁剪）
+// 提取整个命令行内容
 std::string ExtractCommand(const std::string& text) {
     // 实际可提取更精细，这里直接返回整段
     return text;
@@ -877,7 +877,7 @@ void ServerThread_from_CMDAndPowerShell() {
             message.newvalue[0]=0;
             message.newvalue_len=0;
             message.valuetype[0]=0;
-            // 启动线程发送消息，并等待完成（阻塞回调，但简化处理）
+            // 启动线程发送消息，并等待完成
             std::thread server(ClientThread_to_USERUI, &message);
             server.join(); 
         }
@@ -964,7 +964,7 @@ void ServerThread_from_CreateWindows() {
             message.newvalue[0]=0;
             message.newvalue_len=0;
             message.valuetype[0]=0;
-            // 启动线程发送消息，并等待完成（阻塞回调，但简化处理）
+            // 启动线程发送消息，并等待完成
             std::thread server(ClientThread_to_USERUI, &message);
             server.join(); 
 
@@ -1027,7 +1027,7 @@ void ServerThread_from_SystemService() {
             message.newvalue[0]=0;
             message.newvalue_len=0;
             message.valuetype[0]=0;
-            // 启动线程发送消息，并等待完成（阻塞回调，但简化处理）
+            // 启动线程发送消息，并等待完成
             std::thread server(ClientThread_to_USERUI, &message);
             server.join(); 
 
@@ -1089,7 +1089,7 @@ void ServerThread_from_TaskScheduler() {
             message.newvalue[0]=0;
             message.newvalue_len=0;
             message.valuetype[0]=0;
-            // 启动线程发送消息，并等待完成（阻塞回调，但简化处理）
+            // 启动线程发送消息，并等待完成
             std::thread server(ClientThread_to_USERUI, &message);
             server.join(); 
 
@@ -1180,7 +1180,7 @@ void ServerThread_from_MemoryGuard() {
             message.newvalue[0]=0;
             message.newvalue_len=0;
             message.valuetype[0]=0;
-            // 启动线程发送消息，并等待完成（阻塞回调，但简化处理）
+            // 启动线程发送消息，并等待完成
             std::thread server(ClientThread_to_USERUI, &message);
             server.join(); 
 

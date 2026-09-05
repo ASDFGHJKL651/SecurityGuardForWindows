@@ -473,7 +473,7 @@ struct TasksInfo {
     std::vector<std::wstring> exePaths; // 所有可执行文件完整路径
 };
 
-//  JSON 序列化特化（修正版） 
+//  JSON 序列化特化
 namespace nlohmann {
     template<>
     struct adl_serializer<TasksInfo> {

@@ -616,7 +616,6 @@ public:
 
     static bool hasValidSignature(const std::string& filePath) {
 #ifdef _WIN32
-        // 不实现
         return false;
 #endif
         return false;

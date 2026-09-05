@@ -1663,7 +1663,7 @@ static void scan_il_for_high_risk(const BYTE* ilData, size_t ilSize,
             continue;
         } else if (op == OP_CALL) {
             callCount++;
-            // 尝试解析目标 token（简单）
+            // 尝试解析目标 token
             if (i + 5 <= ilSize) {
                 DWORD token = *(DWORD*)(ilData + i + 1);
                 // 根据 token 类型判断是否高风险（如 MethodInfo.Invoke）
@@ -1915,7 +1915,7 @@ static bool ParseMetadataTables(const BYTE* metaBase, size_t metaSize,
             m.RVA = *(const DWORD*)(record);
             m.ImplFlags = *(const WORD*)(record + 4);
             m.Flags = *(const WORD*)(record + 6);
-            // Name, Signature, ParamList 可能宽度不同，但我们只用于辅助，简化读取（使用固定4字节）
+            // Name, Signature, ParamList 可能宽度不同，但我们只用于辅助
             // 但为了正确性，根据索引宽度读取
             DWORD nameOffset = 0;
             if (stringsAre2Bytes) {

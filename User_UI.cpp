@@ -15,7 +15,7 @@ window type:
 
 g++编译:
 cd %g++Path%
-g++ -fdiagnostics-color=always -g "%SourceCodePath%\User_UI.cpp" -o "%ExecutablePath%\User_UI.exe" -mwindows -municode -lwbemuuid -loleaut32 -ladvapi32 -luuid -ltaskschd -lws2_32 -liphlpapi -lfwpuclnt -lpsapi -lole32 -lcomdlg32 -lshell32 -std=c++11 -Wno-write-strings
+g++ -fdiagnostics-color=always -g "%SourceCodePath%\User_UI.cpp" -o "%ExecutablePath%\User_UI.exe" -mwindows -municode -lwbemuuid -loleaut32 -ladvapi32 -luuid -ltaskschd -lws2_32 -liphlpapi -lfwpuclnt -lpsapi -lole32  -lcomdlg32 -lshell32 -lbcrypt -lshlwapi -luser32 -std=c++11 -Wno-write-strings
 
 运行权限：管理员权限
 */
@@ -63,8 +63,12 @@ g++ -fdiagnostics-color=always -g "%SourceCodePath%\User_UI.cpp" -o "%Executable
 #include <shlobj.h>    
 #include "logrecord.h"
 #include <mstask.h>      // ITaskScheduler, ITask, CLSID_CTaskScheduler
+#include "AES-256-CBCEncryptionCommon.h"
 #pragma comment(lib, "mstask.lib") 
 #pragma comment(lib, "fwpuclnt.lib")
+#pragma comment(lib, "bcrypt.lib")
+#pragma comment(lib, "shlwapi.lib")
+#pragma comment(lib, "user32.lib")
 
 #include "nlohmann/json.hpp"
 
@@ -132,6 +136,20 @@ GUID FWPM_CONDITION_IP_REMOTE_ADDRESS =
 GUID FWPM_CONDITION_IP_REMOTE_PORT = 
     {0xc35a604d, 0xd22b, 0x4e1a, {0x91, 0xb4, 0x68, 0xf6, 0x74, 0xee, 0x67, 0x4b}};
 
+
+const std::wstring CONFIG_PASSWORD = L"9#Kp$LmQ@2wXz&Yv!5nR*TjH^3bC&Vg7";
+
+#define EDITOR_CLASS_NAME L"TextEditorClass"
+
+struct EditorData {
+    std::wstring filePath;
+    HWND hEdit;
+    bool modified;
+    WNDPROC oldEditProc; // 新增
+};
+
+std::unordered_map<std::wstring, HWND> g_openEditorMap;
+
 // 全局数据
 HWND g_hWnds[WINDOW_COUNT] = { NULL };
 BOOL g_bTrayCreated = FALSE;
@@ -158,10 +176,10 @@ std::unordered_map<std::wstring, std::chrono::steady_clock::time_point> g_alertC
 std::unordered_map<std::wstring, std::chrono::steady_clock::time_point> g_regAlertCache;
 const int REG_ALERT_CACHE_EXPIRY_SECONDS = 30;   // 30秒
 
-//信任路径集合（永久有效，本次运行期间不弹窗）
+// [MOD] 信任路径集合（永久有效，本次运行期间不弹窗）
 std::unordered_set<std::wstring> g_trustedPaths;
 
-//动态基础目录（存放程序所在路径）
+// [MOD] 动态基础目录（存放程序所在路径）
 std::wstring g_baseDir;
 
 std::unordered_set<std::string> g_networkAlertCache;
@@ -298,20 +316,70 @@ bool IsService(const std::wstring& name);
 bool IsTask(const std::wstring& path);
 static std::string WideToUtf8(const std::wstring& wstr);
 
+std::vector<BYTE> ReadFileContent(const std::wstring& path) {
+    HANDLE hFile = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, NULL,
+                               OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) return {};
+    DWORD size = GetFileSize(hFile, NULL);
+    std::vector<BYTE> buffer(size);
+    DWORD read = 0;
+    ReadFile(hFile, buffer.data(), size, &read, NULL);
+    CloseHandle(hFile);
+    return buffer;
+}
+
+bool WriteFileContent(const std::wstring& path, const std::vector<BYTE>& data) {
+    HANDLE hFile = CreateFileW(path.c_str(), GENERIC_WRITE, 0, NULL,
+                               CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) return false;
+    DWORD written = 0;
+    bool ok = WriteFile(hFile, data.data(), (DWORD)data.size(), &written, NULL) && (written == data.size());
+    CloseHandle(hFile);
+    return ok;
+}
+
+std::vector<BYTE> StringToBytes(const std::wstring& str) {
+    std::string utf8 = WideToUtf8(str);
+    return std::vector<BYTE>(utf8.begin(), utf8.end());
+}
+
+// 辅助：将 JSON 加密写入 HighTrustWhiteList.json
+void WriteHighTrustList(const std::wstring& jsonPath, const nlohmann::json& j) {
+    std::string content = j.dump(4);
+    std::vector<BYTE> plain(content.begin(), content.end());
+    std::vector<BYTE> password = StringToBytes(CONFIG_PASSWORD);
+    std::vector<BYTE> encrypted = AesEncrypt(plain, password);
+    if (!encrypted.empty()) {
+        WriteFileContent(jsonPath, encrypted);
+    }
+}
+
 // 将路径添加到 HighTrustWhiteList.json 的指定数组（"Files" 或 "Paths"）
 void AddPathToHighTrustList(const std::wstring& path, bool isFolder) {
     if (path.empty()) return;
 
     std::wstring jsonPathW = g_baseDir + L"\\WhiteList\\HighTrustWhiteList.json";
-    std::string jsonPath = WideToUtf8(jsonPathW);
+
+    // 读取加密文件并解密
+    std::vector<BYTE> encrypted = ReadFileContent(jsonPathW);
+    std::vector<BYTE> password = StringToBytes(CONFIG_PASSWORD);
+    std::vector<BYTE> plain = AesDecrypt(encrypted, password);
 
     nlohmann::json j;
-    std::ifstream in(jsonPath);
-    if (in.is_open()) {
-        try { in >> j; } catch (...) { j = nlohmann::json::object(); }
-        in.close();
+    if (!plain.empty()) {
+        std::string jsonStr(plain.begin(), plain.end());
+        try {
+            j = nlohmann::json::parse(jsonStr);
+        } catch (...) {
+            j = nlohmann::json::object();
+        }
     } else {
         j = nlohmann::json::object();
+    }
+
+    const char* arrayName = isFolder ? "Paths" : "Files";
+    if (!j.contains(arrayName) || !j[arrayName].is_array()) {
+        j[arrayName] = nlohmann::json::array();
     }
 
     std::string pathUtf8 = WideToUtf8(path);
@@ -319,12 +387,6 @@ void AddPathToHighTrustList(const std::wstring& path, bool isFolder) {
     std::string lowerPath = pathUtf8;
     std::transform(lowerPath.begin(), lowerPath.end(), lowerPath.begin(), ::tolower);
 
-    const char* arrayName = isFolder ? "Paths" : "Files";
-    if (!j.contains(arrayName) || !j[arrayName].is_array()) {
-        j[arrayName] = nlohmann::json::array();
-    }
-
-    // 去重（忽略大小写）
     bool exists = false;
     for (auto& item : j[arrayName]) {
         if (item.is_string()) {
@@ -340,14 +402,9 @@ void AddPathToHighTrustList(const std::wstring& path, bool isFolder) {
         j[arrayName].push_back(pathUtf8);
     }
 
-    // 写回文件
-    std::ofstream out(jsonPath, std::ios::out | std::ios::trunc | std::ios::binary);
-    if (out.is_open()) {
-        std::string content = j.dump(4);
-        out.write(content.c_str(), content.size());
-        out.close();
-    }
+    WriteHighTrustList(jsonPathW, j);
 }
+
 
 bool InitWFP() {
     DWORD ret = FwpmEngineOpen0(NULL, RPC_C_AUTHN_WINNT, NULL, NULL, &g_engineHandle);
@@ -691,7 +748,7 @@ static HKEY GetRootKeyW(const std::wstring& rootStr) {
     return nullptr;
 }
 
- // SetRegistryValue 函数
+ //SetRegistryValue 函数
 LONG SetRegistryValue(
     BYTE* lpFullPath,
     BYTE* lpType,
@@ -979,8 +1036,8 @@ void ApplyDecision(int buttonId, const std::wstring& path, int pid) {
             // 无操作
             break;
         case IDC_BUTTON_QUARANTINE: {
-            //使用动态路径
-            std::wstring wcmd_isol = L"\"" + g_baseDir + L"\\isol.exe\"  add  \"" + g_baseDir + L"\\ISOL\"  \"" + path + L"\"  @pASs7W#Ord";
+            // [MOD] 使用动态路径
+            std::wstring wcmd_isol = L"\"" + g_baseDir + L"\\isol.exe\"  add  *  \"" + path + L"\"  *";
             wchar_t* cmd_isol_ = new wchar_t[wcslen(wcmd_isol.c_str()) + 1];
             lstrcpyW(cmd_isol_, wcmd_isol.c_str());
             CreateProcess(NULL, cmd_isol_, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
@@ -1510,6 +1567,178 @@ void PerformExit() {
     }
 }
 
+static bool SaveEditorFile(HWND hwnd, EditorData* pData) {
+    if (!pData || !pData->hEdit) return false;
+
+    // 获取编辑框文本（宽字符）
+    int len = GetWindowTextLengthW(pData->hEdit) + 1;
+    std::wstring text(len, L'\0');
+    GetWindowTextW(pData->hEdit, &text[0], len);
+    text.resize(len - 1);   // 去掉末尾的 L'\0'
+
+    // 转换为 UTF-8 窄字符串
+    int utf8Len = WideCharToMultiByte(CP_UTF8, 0, text.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    if (utf8Len <= 0) {
+        MessageBoxW(hwnd, L"文本编码转换失败", L"错误", MB_OK | MB_ICONERROR);
+        return false;
+    }
+    std::string utf8Text(utf8Len, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, text.c_str(), -1, &utf8Text[0], utf8Len, nullptr, nullptr);
+    utf8Text.pop_back();   // 移除末尾的 '\0'
+
+    // 构造明文向量并加密
+    std::vector<BYTE> plain(utf8Text.begin(), utf8Text.end());
+    std::vector<BYTE> password = StringToBytes(CONFIG_PASSWORD);
+    std::vector<BYTE> encrypted = AesEncrypt(plain, password);
+    if (encrypted.empty()) {
+        MessageBoxW(hwnd, L"加密数据失败，请检查密钥", L"错误", MB_OK | MB_ICONERROR);
+        return false;
+    }
+
+    // 写入文件
+    if (!WriteFileContent(pData->filePath, encrypted)) {
+        MessageBoxW(hwnd, L"写入文件失败，请检查目录权限", L"错误", MB_OK | MB_ICONERROR);
+        return false;
+    }
+
+    pData->modified = false;
+    return true;
+}
+
+// 编辑框子类化过程，用于捕获 Ctrl+S
+static LRESULT CALLBACK EditSubclassProc(HWND hEdit, UINT msg, WPARAM wParam, LPARAM lParam) {
+    HWND hParent = GetParent(hEdit);
+    EditorData* pData = (EditorData*)GetWindowLongPtr(hParent, GWLP_USERDATA);
+    if (pData) {
+        if (msg == WM_KEYDOWN && wParam == 'S' && (GetKeyState(VK_CONTROL) & 0x8000)) {
+            // Ctrl+S 被按下，执行保存
+            SaveEditorFile(hParent, pData);
+            return 0;   // 消息已处理，不再传递给默认过程
+        }
+        // 其他消息转发给原窗口过程
+        if (pData->oldEditProc) {
+            return CallWindowProc(pData->oldEditProc, hEdit, msg, wParam, lParam);
+        }
+    }
+    return DefWindowProc(hEdit, msg, wParam, lParam);
+}
+
+// 完整编辑器窗口过程
+LRESULT CALLBACK EditorWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    EditorData* pData = (EditorData*)GetWindowLongPtr(hwnd, GWLP_USERDATA);
+
+    switch (msg) {
+        case WM_CREATE: {
+            pData = new EditorData();
+            SetWindowLongPtr(hwnd, GWLP_USERDATA, (LONG_PTR)pData);
+            pData->modified = false;
+
+            // 获取创建时传入的文件路径
+            LPCREATESTRUCT cs = (LPCREATESTRUCT)lParam;
+            if (cs->lpCreateParams) {
+                pData->filePath = (LPCWSTR)cs->lpCreateParams;
+            }
+
+            // 创建编辑框控件
+            pData->hEdit = CreateWindowExW(
+                WS_EX_CLIENTEDGE,
+                L"EDIT", L"",
+                WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | ES_AUTOHSCROLL |
+                WS_VSCROLL | WS_HSCROLL,
+                0, 0, 0, 0,
+                hwnd, (HMENU)1, GetModuleHandle(NULL), NULL
+            );
+
+            // 读取文件（若不存在则创建空加密文件）
+            std::vector<BYTE> encrypted = ReadFileContent(pData->filePath);
+            std::vector<BYTE> password = StringToBytes(CONFIG_PASSWORD);
+            std::vector<BYTE> plain;
+
+            if (encrypted.empty()) {
+                std::vector<BYTE> emptyPlain;
+                std::vector<BYTE> emptyEncrypted = AesEncrypt(emptyPlain, password);
+                if (!emptyEncrypted.empty()) {
+                    WriteFileContent(pData->filePath, emptyEncrypted);
+                    encrypted = emptyEncrypted;
+                    plain.clear();
+                } else {
+                    plain.clear();
+                }
+            } else {
+                plain = AesDecrypt(encrypted, password);
+            }
+
+            std::wstring text;
+            if (!plain.empty()) {
+                int len = MultiByteToWideChar(CP_UTF8, 0, (char*)plain.data(), (int)plain.size(), NULL, 0);
+                if (len > 0) {
+                    text.resize(len);
+                    MultiByteToWideChar(CP_UTF8, 0, (char*)plain.data(), (int)plain.size(), &text[0], len);
+                }
+            }
+            SetWindowTextW(pData->hEdit, text.c_str());
+
+            // ---------- 子类化编辑框，捕获 Ctrl+S ----------
+            pData->oldEditProc = (WNDPROC)SetWindowLongPtr(pData->hEdit, GWLP_WNDPROC, (LONG_PTR)EditSubclassProc);
+
+            // ---------- 将当前窗口加入全局映射（单实例控制） ----------
+            if (!pData->filePath.empty()) {
+                std::wstring lowerPath = ToLower(pData->filePath);
+                g_openEditorMap[lowerPath] = hwnd;
+            }
+
+            return 0;
+        }
+
+        case WM_SIZE: {
+            if (pData && pData->hEdit) {
+                RECT rc;
+                GetClientRect(hwnd, &rc);
+                SetWindowPos(pData->hEdit, NULL, 0, 0, rc.right, rc.bottom, SWP_NOZORDER);
+            }
+            return 0;
+        }
+
+        case WM_COMMAND: {
+            if (LOWORD(wParam) == 1 && HIWORD(wParam) == EN_CHANGE) {
+                if (pData) pData->modified = true;
+            }
+            return 0;
+        }
+
+        // 原 WM_KEYDOWN 处理已移除（由子类化过程接管）
+
+        case WM_CLOSE: {
+            if (pData && pData->modified) {
+                int ret = MessageBoxW(hwnd, L"文件已修改，是否保存？", L"确认", MB_YESNOCANCEL);
+                if (ret == IDYES) {
+                    if (!SaveEditorFile(hwnd, pData)) {
+                        return 0;   // 保存失败，不关闭
+                    }
+                } else if (ret == IDCANCEL) {
+                    return 0;
+                }
+            }
+            DestroyWindow(hwnd);
+            return 0;
+        }
+
+        case WM_DESTROY: {
+            // 从全局映射中移除
+            if (pData && !pData->filePath.empty()) {
+                std::wstring lowerPath = ToLower(pData->filePath);
+                g_openEditorMap.erase(lowerPath);
+            }
+            if (pData) delete pData;
+            SetWindowLongPtr(hwnd, GWLP_USERDATA, 0);
+            return 0;
+        }
+
+        default:
+            return DefWindowProc(hwnd, msg, wParam, lParam);
+    }
+    return 0;
+}
 
 //  窗口过程 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -2066,7 +2295,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 delete pMsg;
                 return 0;
             }
-            //检查是否已被用户信任（本次运行永久有效）
+            // [MOD] 检查是否已被用户信任（本次运行永久有效）
             std::wstring lowerPath = ToLower(pMsg->path);
             if (pMsg->WindowType != 4){
                 if (g_trustedPaths.find(lowerPath) != g_trustedPaths.end()) {
@@ -2134,7 +2363,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 si.cb = sizeof(si);
                 ZeroMemory(&pi, sizeof(pi));
                 //使用pMsg->path
-                std::wstring wcmd_isol = L"\"" + g_baseDir + L"\\isol.exe\"  add  \"" + g_baseDir + L"\\ISOL\"  \"" + (wchar_t*)(pMsg->path) + L"\"  @pASs7W#Ord";
+                std::wstring wcmd_isol = L"\"" + g_baseDir + L"\\isol.exe\"  add  *  \"" + (wchar_t*)(pMsg->path) + L"\"  *";
                 wchar_t* cmd_isol_ = new wchar_t[wcslen(wcmd_isol.c_str()) + 1];
                 lstrcpyW(cmd_isol_, wcmd_isol.c_str());
                 CreateProcess(NULL, cmd_isol_, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
@@ -2252,9 +2481,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         ZeroMemory(&si, sizeof(si));
         si.cb = sizeof(si);
         ZeroMemory(&pi, sizeof(pi));
-        //使用动态路径构建命令
+        // [MOD] 使用动态路径构建命令
         std::wstring wcmd_sandbox = g_baseDir + L"\\SandBox.exe \"" + (wchar_t*)(pData->path) + L"\"";
-        std::wstring wcmd_isol = L"\"" + g_baseDir + L"\\isol.exe\"  add  \"" + g_baseDir + L"\\ISOL\"  \"" + (wchar_t*)(pData->path) + L"\"  @pASs7W#Ord";
+        std::wstring wcmd_isol = L"\"" + g_baseDir + L"\\isol.exe\"  add  *  \"" + (wchar_t*)(pData->path) + L"\"  *";
         std::wstring wcmd_del = (std::wstring)L"cmd /c del /f /q /a \"" + (wchar_t*)(pData->path) + (std::wstring)L"\"";
         std::wstring wcmd_del_fromzip = L"\"" + g_baseDir + L"\\delfromzip.exe\"  \"" + (wchar_t*)(pData->path) + L"\"";
         wchar_t* cmd_sandbox_ = new wchar_t[wcslen(wcmd_sandbox.c_str()) + 1];
@@ -2280,7 +2509,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 std::wstring lowerPath = ToLower(pData->path);
                 auto now = std::chrono::steady_clock::now();
                 g_decisionCache[lowerPath] = { buttonId, now };
-                //若为信任，额外记录到永久集合
+                // [MOD] 若为信任，额外记录到永久集合
                 if (buttonId == IDC_BUTTON_TRUST) {
                     g_trustedPaths.insert(lowerPath);
                 }
@@ -2408,17 +2637,100 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             }
             case IDC_BUTTON_EDIT_MALICIOUS: {
                 std::wstring filePath = g_baseDir + L"\\WhiteList\\malicious.txt";
-                ShellExecute(NULL, L"open", L"notepad.exe", filePath.c_str(), NULL, SW_SHOW);
+                std::wstring lowerPath = ToLower(filePath);
+
+                auto it = g_openEditorMap.find(lowerPath);
+                if (it != g_openEditorMap.end()) {
+                    HWND hExisting = it->second;
+                    if (IsWindow(hExisting)) {
+                        ShowWindow(hExisting, SW_SHOW);
+                        SetForegroundWindow(hExisting);
+                        break;
+                    } else {
+                        g_openEditorMap.erase(it);
+                    }
+                }
+
+                HWND hEditor = CreateWindowExW(
+                    0,
+                    EDITOR_CLASS_NAME,
+                    L"编辑恶意 IP/域名",
+                    WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                    CW_USEDEFAULT, CW_USEDEFAULT,
+                    600, 400,
+                    NULL, NULL,
+                    GetModuleHandle(NULL),
+                    (LPVOID)filePath.c_str()
+                );
+                if (!hEditor) {
+                    MessageBoxW(hwnd, L"无法打开编辑器", L"错误", MB_OK | MB_ICONERROR);
+                }
                 break;
             }
+
             case IDC_BUTTON_EDIT_WHITELIST: {
                 std::wstring filePath = g_baseDir + L"\\WhiteList\\whitelist.txt";
-                ShellExecute(NULL, L"open", L"notepad.exe", filePath.c_str(), NULL, SW_SHOW);
+                std::wstring lowerPath = ToLower(filePath);
+
+                auto it = g_openEditorMap.find(lowerPath);
+                if (it != g_openEditorMap.end()) {
+                    HWND hExisting = it->second;
+                    if (IsWindow(hExisting)) {
+                        ShowWindow(hExisting, SW_SHOW);
+                        SetForegroundWindow(hExisting);
+                        break;
+                    } else {
+                        g_openEditorMap.erase(it);
+                    }
+                }
+
+                HWND hEditor = CreateWindowExW(
+                    0,
+                    EDITOR_CLASS_NAME,
+                    L"编辑 IP/域名白名单",
+                    WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                    CW_USEDEFAULT, CW_USEDEFAULT,
+                    600, 400,
+                    NULL, NULL,
+                    GetModuleHandle(NULL),
+                    (LPVOID)filePath.c_str()
+                );
+                if (!hEditor) {
+                    MessageBoxW(hwnd, L"无法打开编辑器", L"错误", MB_OK | MB_ICONERROR);
+                }
                 break;
             }
+
             case IDC_BUTTON_EDIT_TLS: {
                 std::wstring filePath = g_baseDir + L"\\WhiteList\\tls_fingerprints.txt";
-                ShellExecute(NULL, L"open", L"notepad.exe", filePath.c_str(), NULL, SW_SHOW);
+                std::wstring lowerPath = ToLower(filePath);
+
+                auto it = g_openEditorMap.find(lowerPath);
+                if (it != g_openEditorMap.end()) {
+                    HWND hExisting = it->second;
+                    if (IsWindow(hExisting)) {
+                        ShowWindow(hExisting, SW_SHOW);
+                        SetForegroundWindow(hExisting);
+                        break;
+                    } else {
+                        g_openEditorMap.erase(it);
+                    }
+                }
+
+                HWND hEditor = CreateWindowExW(
+                    0,
+                    EDITOR_CLASS_NAME,
+                    L"编辑 TLS 指纹黑名单",
+                    WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                    CW_USEDEFAULT, CW_USEDEFAULT,
+                    600, 400,
+                    NULL, NULL,
+                    GetModuleHandle(NULL),
+                    (LPVOID)filePath.c_str()
+                );
+                if (!hEditor) {
+                    MessageBoxW(hwnd, L"无法打开编辑器", L"错误", MB_OK | MB_ICONERROR);
+                }
                 break;
             }
             case IDC_BUTTON_RESTORE_ISOL: {
@@ -2444,7 +2756,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                         baseName = baseName.substr(0, dotPos);
                     }
                     // 构造命令行
-                    std::wstring cmd = L"\"" + g_baseDir + L"\\isol.exe\" extract \"" + g_baseDir + L"\\ISOL\" \"" + baseName + L"\" * @pASs7W#Ord";
+                    std::wstring cmd = L"\"" + g_baseDir + L"\\isol.exe\" extract * \"" + baseName + L"\" * *";
                     STARTUPINFO si = { sizeof(si) };
                     PROCESS_INFORMATION pi;
                     if (CreateProcess(NULL, (LPWSTR)cmd.c_str(), NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
@@ -2566,35 +2878,30 @@ HWND CreateAlertWindow(const MessageFromControlCenter& data) {
 void AddToHighTrustWhiteList(const std::wstring& filePath) {
     if (filePath.empty()) return;
 
-    // 构建绝对路径（宽字符）
     std::wstring jsonPathW = g_baseDir + L"\\WhiteList\\HighTrustWhiteList.json";
-    // 转换为 UTF‑8 窄字符串（用于 fstream）
-    std::string jsonPath = WideToUtf8(jsonPathW);
 
-    // 读取现有 JSON
+    std::vector<BYTE> encrypted = ReadFileContent(jsonPathW);
+    std::vector<BYTE> password = StringToBytes(CONFIG_PASSWORD);
+    std::vector<BYTE> plain = AesDecrypt(encrypted, password);
+
     nlohmann::json j;
-    std::ifstream in(jsonPath);
-    if (in.is_open()) {
+    if (!plain.empty()) {
+        std::string jsonStr(plain.begin(), plain.end());
         try {
-            in >> j;
+            j = nlohmann::json::parse(jsonStr);
         } catch (...) {
             j = nlohmann::json::object();
         }
-        in.close();
     } else {
         j = nlohmann::json::object();
     }
 
-    // 确保 Files 数组存在
     if (!j.contains("Files") || !j["Files"].is_array()) {
         j["Files"] = nlohmann::json::array();
     }
 
-    // 将文件路径转为 UTF‑8 字符串用于存储
     std::string filePathUtf8 = WideToUtf8(filePath);
     if (filePathUtf8.empty()) return;
-
-    // 检查是否已存在（忽略大小写）
     std::string lowerPath = filePathUtf8;
     std::transform(lowerPath.begin(), lowerPath.end(), lowerPath.begin(), ::tolower);
 
@@ -2609,18 +2916,11 @@ void AddToHighTrustWhiteList(const std::wstring& filePath) {
             }
         }
     }
-
     if (!exists) {
         j["Files"].push_back(filePathUtf8);
     }
 
-    // 写回文件（UTF-8 without BOM）
-    std::ofstream out(jsonPath, std::ios::out | std::ios::trunc | std::ios::binary);
-    if (out.is_open()) {
-        std::string content = j.dump(4); // 缩进4空格
-        out.write(content.c_str(), content.size());
-        out.close();
-    }
+    WriteHighTrustList(jsonPathW, j);
 }
 
 //  加载白名单 
@@ -2650,7 +2950,7 @@ void LoadWhitelist() {
 
 //  程序入口 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int nCmdShow) {
-    //获取当前可执行文件所在目录并保存到全局变量
+    // [MOD] 获取当前可执行文件所在目录并保存到全局变量
     wchar_t exePath[MAX_PATH];
     GetModuleFileName(NULL, exePath, MAX_PATH);
     std::wstring fullPath(exePath);
@@ -2693,7 +2993,12 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, PWSTR pCmdLine, int nCmdShow
     wc.lpszClassName = CLASS_NAME;
     wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
     RegisterClass(&wc);
-
+    WNDCLASS wcEditor = {};
+    wcEditor.lpfnWndProc = EditorWndProc;
+    wcEditor.hInstance = hInstance;
+    wcEditor.lpszClassName = EDITOR_CLASS_NAME;
+    wcEditor.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+    RegisterClass(&wcEditor);
     HWND hwndMain = CreateWindowEx(
         0, CLASS_NAME, L"Security Guard For Windows", WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT, CW_USEDEFAULT, BASE_WIDTH, BASE_HEIGHT,

@@ -1,26 +1,28 @@
 /*
 Verification.cpp
 
-开机以管理员权限自启动，校验程序哈希值(SHA-256)，恢复被篡改的程序，启动校验通过的程序
+开机以管理员权限自启动，校验程序哈希值（HMAC-SHA256），
+若哈希不匹配则从 BackUp 目录恢复，然后启动所有校验通过的可执行文件。
 
-g++编译:
-cd %g++Path%
+编译命令（示例）：
 g++.exe -fdiagnostics-color=always -g "%SourceCodePath%\Verification.cpp" -o "%Executable%\Verification\Verification.exe" -lbcrypt -lstdc++fs -static-libgcc -static-libstdc++
-
-运行权限：管理员权限
+运行需要管理员权限。
 */
-#include "Common.h"
+#include "AES-256-CBCEncryptionCommon.h"
 #include <filesystem>
 #include <iomanip>
+#include <iostream>
 
+// 校验并尝试恢复文件
 bool VerifyAndReplace(const std::string& filePath, const std::string& backupPath,
                       const std::string& expectedHex, bool isDll) {
     auto hashBytes = Sha256File(filePath);
     std::string currentHex = BytesToHex(hashBytes);
     if (currentHex == expectedHex) {
-        return true;
+        return true; // 哈希一致
     }
 
+    // 哈希不一致，尝试从备份恢复
     if (!std::filesystem::exists(backupPath)) {
         std::cerr << "Backup not found: " << backupPath << std::endl;
         return false;
@@ -34,6 +36,7 @@ bool VerifyAndReplace(const std::string& filePath, const std::string& backupPath
         return false;
     }
 
+    // 重新校验恢复后的文件
     auto newHash = Sha256File(filePath);
     std::string newHex = BytesToHex(newHash);
     return (newHex == expectedHex);
@@ -44,6 +47,7 @@ int main() {
     std::string parentDir = GetParentDirectory(exeDir);
     std::string configPath = exeDir + "Configuration\\HashValue.json";
 
+    // 读取加密的哈希文件
     std::ifstream in(configPath, std::ios::binary);
     if (!in) {
         std::cerr << "Cannot open " << configPath << std::endl;
@@ -54,34 +58,34 @@ int main() {
     in.close();
     std::cout << "Read encrypted file size: " << encrypted.size() << " bytes." << std::endl;
 
-    std::vector<BYTE> key = DeriveKey("P@aS7sw4&OR7d");
+    // 解密（使用同一密码）
+    std::string password = "G7#kLp$2Qr!vX9&mN4@zRw^5YcB*eH3";
+    std::vector<BYTE> key(password.begin(), password.end());
     std::vector<BYTE> plainBytes = AesDecrypt(encrypted, key);
+
+    // 清除密码和密钥
+    SecureZeroString(password);
+    SecureZeroVector(key);
+
     if (plainBytes.empty()) {
-        std::cerr << "Decryption failed!" << std::endl;
+        std::cerr << "Decryption failed! Check diagnostic messages." << std::endl;
         return 1;
     }
     std::cout << "Decrypted size: " << plainBytes.size() << " bytes." << std::endl;
 
-    std::cout << "First 20 bytes (hex): ";
-    for (size_t i = 0; i < std::min<size_t>(20, plainBytes.size()); ++i) {
-        std::cout << std::hex << std::setw(2) << std::setfill('0') << (int)plainBytes[i] << " ";
-    }
-    std::cout << std::dec << std::endl;
-
-    while (!plainBytes.empty() && plainBytes.back() == 0) {
-        plainBytes.pop_back();
-    }
-
+    // 转换为 JSON 字符串（新加密不会产生无用的尾随零，直接转换）
     std::string jsonStr(plainBytes.begin(), plainBytes.end());
+    SecureZeroVector(plainBytes); // 清除明文
+
     nlohmann::json j;
     try {
         j = nlohmann::json::parse(jsonStr);
     } catch (const std::exception& e) {
         std::cerr << "JSON parse error: " << e.what() << std::endl;
-        std::cerr << "Raw string (first 100 chars): " << jsonStr.substr(0, 100) << std::endl;
         return 1;
     }
 
+    // 1. 先校验所有 DLL，若失败则退出
     for (auto& [key, hashHex] : j.items()) {
         bool isDll = (key.length() >= 4 && key.substr(key.length() - 4) == ".dll");
         if (!isDll) continue;
@@ -94,6 +98,7 @@ int main() {
         }
     }
 
+    // 2. 校验所有 EXE 并启动它们（即使某个 EXE 无法恢复也继续执行其他）
     for (auto& [key, hashHex] : j.items()) {
         bool isDll = (key.length() >= 4 && key.substr(key.length() - 4) == ".dll");
         if (isDll) continue;
@@ -107,6 +112,7 @@ int main() {
             continue;
         }
 
+        // 启动进程
         STARTUPINFOA si = { sizeof(si) };
         PROCESS_INFORMATION pi = {};
         std::string cmdLine = "\"" + filePath + "\"";

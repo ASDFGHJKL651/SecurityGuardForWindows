@@ -480,7 +480,7 @@ void ParseObject(const std::string& objData, PDFDocInfo& info, const std::wstrin
                             }
                             start = match.suffix().first;
                         }
-                        // 检测循环创建对象或字符串连接（简单模式：连续出现 new 或 +=）
+                        // 检测循环创建对象或字符串连接
                         if (std::regex_search(jsCode, std::wregex(L"(new\\s+\\w+\\s*\\([^)]*\\)\\s*;){5,}", std::regex::icase)) ||
                             std::regex_search(jsCode, std::wregex(L"(\\+=.*;){5,}", std::regex::icase))) {
                             info.warnings.push_back(L"JavaScript 包含大量循环创建对象或字符串连接，可能导致内存耗尽");

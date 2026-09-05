@@ -217,7 +217,7 @@ int main(int argc, char* argv[]) {
         useAppContainer = true;
         std::wcout << L"[Info] Using AppContainer isolation (Windows 8+ with loaded APIs)." << std::endl;
 
-        // 生成唯一容器名称 (修正：使用 wsprintfW)
+        // 生成唯一容器名称
         wsprintfW(containerName, L"SandBox_%u_%u", GetCurrentProcessId(), GetTickCount());
 
         // 构造 InternetClient 能力 SID (S-1-15-3-1)
